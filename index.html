@@ -1,19 +1,19 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0d1b12">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Affenjagd</title>
+<title>Monkey Chase</title>
 <link rel="icon" href="icon.png">
 <link rel="apple-touch-icon" href="icon.png">
 <!-- Vorschau in WhatsApp. og:image und og:url brauchen die vollstaendige
      Adresse, relative Pfade wertet WhatsApp nicht aus. -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Affenjagd - Fangis auf dem Baum">
-<meta property="og:description" content="Zwei Pixel-Affen jagen sich einen Baum hoch und runter. Eine Runde dauert 60 Sekunden.">
+<meta property="og:title" content="Monkey Chase - Tag in the treetops">
+<meta property="og:description" content="Two pixel monkeys chase each other up and down a tree until each has been it three times.">
 <meta property="og:url" content="https://jonaskrieg.github.io/affenjagd/">
 <meta property="og:image" content="https://jonaskrieg.github.io/affenjagd/icon.png">
 <meta property="og:image:width" content="512">
@@ -45,32 +45,35 @@
 /* ============================================================
    AFFENJAGD — Fangis auf einem Baum
 
-   Zwei Affen, einer ist "es" und muss fangen. Berührung tauscht
-   die Rollen. Punkte gibt es nur, solange man nicht "es" ist.
+   Zwei Affen. Wer "es" ist, traegt ein rotes Herz ueber dem Kopf
+   und muss den anderen fangen. Bei Beruehrung wechselt die Rolle,
+   und der neue Faenger bleibt kurz stehen, damit der andere
+   fliehen kann. Gespielt wird, bis jeder dreimal Faenger war.
 
-   Bewegung: Äste sind von unten durchlässig, Lianen führen nach
-   oben, "runter" auf einem Ast lässt einen durchfallen.
+   Der Spieler traegt die weisse Blume, der Gegner die Banane.
    ============================================================ */
 
 // ---------- Maße ----------
 const TILE = 10;
 const COLS = 18;
-const W = COLS * TILE;          // 180 logische Pixel breit
+const W = COLS * TILE;
 const HUD_ROWS = 4;
-const LEVEL_GAP = 5;            // Reihen zwischen zwei Ästen
+const LEVEL_GAP = 5;
 let ROWS, H;
 
 // ---------- Spielwerte ----------
-const ROUND_TIME    = 60;
+const IT_TARGET     = 3;      // so oft muss jeder Faenger gewesen sein
 const RUN_SPEED     = 66;
 const CLIMB_SPEED   = 48;
-const GRAVITY        = 430;
+const GRAVITY       = 430;
 const JUMP_VEL      = -145;
 const MAX_FALL      = 290;
-const DROP_TIME     = 0.28;     // so lange ist der Ast durchlässig
-const TAG_IMMUNE    = 1.3;
-const SLIP_TIME     = 1.1;      // Banane
-const SNIFF_TIME    = 1.4;      // Blume
+const DROP_TIME     = 0.28;
+const FREEZE_TIME   = 1.25;   // Vorsprung fuer den Geflohenen
+const START_FREEZE  = 0.9;
+const TAG_IMMUNE    = 1.5;
+const SLIP_TIME     = 1.1;    // Banane
+const SNIFF_TIME    = 1.4;    // Blume
 const ITEM_COOLDOWN = 6.0;
 const ITEM_LIFE     = 9.0;
 const AI_SPEED_MUL  = 0.97;
@@ -83,14 +86,15 @@ const SKY_BOTTOM = "#2b6b3f";
 const BARK       = "#7a4b23";
 const BARK_TOP   = "#a8712f";
 const BARK_DARK  = "#54331a";
-const LEAF_A     = "#3f9d4a";
+const LEAF_A     = "#4cb35a";
 const LEAF_B     = "#2d7738";
+const LEAF_C     = "#69c96f";
 const VINE_A     = "#4bb257";
 const VINE_B     = "#2f7d3a";
 const EARTH      = "#5a3b1e";
 const GRASS      = "#46a352";
 
-// ---------- Zufall mit festem Startwert: Karte ist immer gleich ----------
+// ---------- Zufall mit festem Startwert: Karte immer gleich ----------
 let seed = 20260726;
 function rnd() {
   seed = (seed * 1664525 + 1013904223) >>> 0;
@@ -99,14 +103,14 @@ function rnd() {
 
 /* ============================================================
    Karte
-   grid:  "." leer   "=" Ast (von unten durchlässig)   "#" Boden
-   vines: true, wenn dort eine Liane hängt
+   grid:  "." leer   "=" Ast (von unten durchlaessig)   "#" Boden
+   vines: true, wenn dort eine Liane haengt
    ============================================================ */
-let grid = null, vines = null, platformRows = [];
+let grid = null, vines = null, platformRows = [], leaves = [];
 
 function inside(c, r) { return c >= 0 && c < COLS && r >= 0 && r < ROWS; }
 function isGround(c, r) {
-  if (c < 0 || c >= COLS) return true;    // Seitenwände
+  if (c < 0 || c >= COLS) return true;
   if (r < 0) return false;
   if (r >= ROWS) return true;
   return grid[r][c] === "#";
@@ -122,21 +126,17 @@ function buildMap() {
     vines.push(new Array(COLS).fill(false));
   }
 
-  // Boden
   for (let c = 0; c < COLS; c++) { grid[ROWS - 1][c] = "#"; grid[ROWS - 2][c] = "#"; }
 
-  // Äste von unten nach oben
   platformRows = [];
   for (let r = ROWS - 2 - LEVEL_GAP; r >= HUD_ROWS + 2; r -= LEVEL_GAP) platformRows.push(r);
   for (const rp of platformRows) for (let c = 0; c < COLS; c++) grid[rp][c] = "=";
 
-  // Lianen: von jedem Ast bis zur Ebene darunter.
-  // Sie reichen eine Reihe über den Ast hinaus, damit man sie
+  // Lianen reichen eine Reihe ueber den Ast hinaus, damit man sie
   // im Stehen greifen kann.
   for (let i = 0; i < platformRows.length; i++) {
     const rp = platformRows[i];
     const rBelow = (i === 0) ? ROWS - 2 : platformRows[i - 1];
-
     const cols = [];
     let guard = 0;
     while (cols.length < 2 && guard++ < 500) {
@@ -147,14 +147,60 @@ function buildMap() {
       for (let r = rp - 1; r <= rBelow - 1; r++) vines[r][c] = true;
     }
   }
+
+  buildLeaves();
+}
+
+// Blattwerk: reine Deko, wackelt sanft. Haengt an Aesten und Lianen —
+// frei schwebende Blaetter sehen aus wie Konfetti, nicht wie Laub.
+function buildLeaves() {
+  leaves = [];
+  let s = 8125;
+  const r = () => { s = (s * 1103515245 + 12345) >>> 0; return s / 4294967296; };
+  const pick = () => { const v = r(); return v < 0.4 ? LEAF_B : (v < 0.8 ? LEAF_A : LEAF_C); };
+
+  // ein Bueschel: mehrere Blaetter dicht beieinander, die gemeinsam wackeln
+  const clump = (cx, cy, n, spread, amp, sp) => {
+    const phase = r() * Math.PI * 2;
+    for (let i = 0; i < n; i++) {
+      leaves.push({
+        x: cx + (r() - 0.5) * spread,
+        y: cy + (r() - 0.5) * spread * 0.6,
+        w: 2 + Math.floor(r() * 3),
+        h: 2 + Math.floor(r() * 2),
+        col: pick(), amp, sp, phase
+      });
+    }
+  };
+
+  // Laub oben auf und unter den Aesten
+  for (const rp of platformRows) {
+    for (let c = 0; c < COLS; c++) {
+      if (r() < 0.62) {
+        clump(c * TILE + TILE / 2, rp * TILE - 2,
+              3 + Math.floor(r() * 3), 8, 0.8 + r() * 1.1, 1.0 + r() * 1.2);
+      }
+      if (r() < 0.3) {
+        clump(c * TILE + TILE / 2, rp * TILE + 9,
+              2 + Math.floor(r() * 2), 6, 1.1 + r() * 1.4, 0.9 + r() * 1.2);
+      }
+    }
+  }
+  // ein paar Ranken an den Lianen
+  for (let rr = 0; rr < ROWS; rr++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!vines[rr][c] || r() > 0.2) continue;
+      clump(c * TILE + (r() < 0.5 ? 1 : 9), rr * TILE + TILE / 2,
+            2, 5, 1.0 + r() * 1.3, 1.2 + r() * 1.3);
+    }
+  }
 }
 
 /* ============================================================
-   Navigationsgraph für den Gegner
+   Navigationsgraph fuer den Gegner
    ============================================================ */
 let adj = [], radj = [], distField = null;
 function idx(c, r) { return r * COLS + c; }
-
 function navFree(c, r) { return inside(c, r) && !isGround(c, r); }
 function navSupported(c, r) {
   if (!inside(c, r)) return false;
@@ -170,14 +216,10 @@ function buildNav() {
     for (let c = 0; c < COLS; c++) {
       if (!navFree(c, r)) continue;
       const from = idx(c, r);
-
       if (navSupported(c, r)) {
-        for (const dc of [-1, 1]) {
-          if (navFree(c + dc, r)) adj[from].push(idx(c + dc, r));
-        }
+        for (const dc of [-1, 1]) if (navFree(c + dc, r)) adj[from].push(idx(c + dc, r));
         if (isVine(c, r) && isVine(c, r - 1)) adj[from].push(idx(c, r - 1));
       }
-      // nach unten: klettern, durchfallen oder springen lassen
       if (navFree(c, r + 1)) adj[from].push(idx(c, r + 1));
     }
   }
@@ -185,7 +227,6 @@ function buildNav() {
   distField = new Int32Array(n);
 }
 
-// distField[x] = Schritte von Kachel x bis zum Ziel
 const bfsQueue = [];
 function computeField(tc, tr) {
   distField.fill(-1);
@@ -235,28 +276,47 @@ const MONKEY = [
   "..oFFo....oFFo..",
   "..oooo....oooo.."
 ];
+
 const BANANA = [
-  "...oo..",
-  "..oyyo.",
-  ".oyyo..",
-  "oyyo...",
-  "oyo....",
-  "oyyo...",
-  ".ooo..."
-];
-const FLOWER = [
-  "..o.o..",
-  ".oWoWo.",
-  "o.WYW.o",
-  ".oWWWo.",
-  "..oWo..",
-  "...g...",
-  "...g..."
+  "....bbo..",
+  "...oyyyo.",
+  "..oyyyyo.",
+  "..oyyyo..",
+  ".oyyyo...",
+  ".oyyyo...",
+  "..oyyo...",
+  "..oyyo...",
+  "...oo...."
 ];
 
-const PAL_PLAYER = { o:"#2b1a0e", F:"#8b5a2b", f:"#c08a4e", s:"#e8bd8a", w:"#ffffff", E:"#241109", m:"#8c4b3a" };
-const PAL_RIVAL  = { o:"#241a26", F:"#6e6473", f:"#a49aab", s:"#ddc9bd", w:"#ffffff", E:"#241109", m:"#7d4a55" };
-const PAL_ITEM   = { o:"#2b1a0e", y:"#f5d13b", W:"#fdfdf5", Y:"#f5d13b", g:"#2f7d3a" };
+const FLOWER = [
+  "...ooo...",
+  "..oWWWo..",
+  ".oWWWWWo.",
+  "oWWWYWWWo",
+  "oWWWYWWWo",
+  ".oWWWWWo.",
+  "..oWWWo..",
+  "...ogo...",
+  "...ogo..."
+];
+
+const HEART = [
+  ".oo.oo.",
+  "oRhoRRo",
+  "oRRRRRo",
+  ".oRRRo.",
+  "..oRo..",
+  "...o..."
+];
+
+// Beide Affen braun, der Gegner eine Spur dunkler und kuehler,
+// damit man im Gewuehl noch erkennt, wer man selbst ist.
+const PAL_PLAYER = { o:"#2b1a0e", F:"#9c6530", f:"#d29a58", s:"#f0c893", w:"#ffffff", E:"#241109", m:"#9a5340" };
+const PAL_RIVAL  = { o:"#241407", F:"#6f4520", f:"#9c6f3e", s:"#c9a074", w:"#ffffff", E:"#241109", m:"#7a3f30" };
+const PAL_ITEM   = { o:"#2b1a0e", y:"#f5d13b", b:"#7a4b23", W:"#fdfdf5", Y:"#f5b93b", g:"#2f7d3a" };
+const PAL_HEART  = { o:"#2b1a0e", R:"#ff3b28", h:"#ff9a8a" };
+const PAL_HEART_OFF = { o:"#3d4a42", R:"#25322b", h:"#25322b" };
 
 function makeSprite(art, pal) {
   const h = art.length, w = art[0].length;
@@ -276,10 +336,62 @@ function makeSprite(art, pal) {
 
 const SPR = {};
 function buildSprites() {
-  SPR.player = makeSprite(MONKEY, PAL_PLAYER);
-  SPR.rival  = makeSprite(MONKEY, PAL_RIVAL);
-  SPR.banana = makeSprite(BANANA, PAL_ITEM);
-  SPR.flower = makeSprite(FLOWER, PAL_ITEM);
+  SPR.player    = makeSprite(MONKEY, PAL_PLAYER);
+  SPR.rival     = makeSprite(MONKEY, PAL_RIVAL);
+  SPR.banana    = makeSprite(BANANA, PAL_ITEM);
+  SPR.flower    = makeSprite(FLOWER, PAL_ITEM);
+  SPR.heart     = makeSprite(HEART, PAL_HEART);
+  SPR.heartOff  = makeSprite(HEART, PAL_HEART_OFF);
+  SPR.hug       = buildHugScene();
+}
+
+// Endbild: beide Affen sitzen auf einem Ast und umarmen sich.
+// Aus den vorhandenen Sprites zusammengesetzt, damit der Stil passt.
+function buildHugScene() {
+  const w = 40, h = 24;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  g.imageSmoothingEnabled = false;
+
+  const BRANCH_Y = 17;
+
+  // dicht aneinander, damit es nach Anschmiegen aussieht
+  g.drawImage(SPR.player, 5, 2);
+  g.save();
+  g.translate(19 + 16, 2); g.scale(-1, 1);
+  g.drawImage(SPR.rival, 0, 0);
+  g.restore();
+
+  // Keine Arme quer durchs Bild — nur je eine Hand, die ueber der
+  // aeusseren Schulter des anderen auftaucht.
+  const hand = (x, y, fur) => {
+    g.fillStyle = "#241407"; g.fillRect(x, y - 1, 5, 6);
+    g.fillStyle = fur;       g.fillRect(x + 1, y, 3, 4);
+    g.fillStyle = "#241407"; g.fillRect(x + 1, y + 2, 3, 1);   // Finger
+  };
+  hand(30, 12, "#d29a58");   // Hand des linken Affen
+  hand(5, 13, "#9c6f3e");    // Hand des rechten Affen
+
+  // Ast, auf dem sie sitzen, verdeckt die Beine
+  g.fillStyle = BARK;      g.fillRect(1, BRANCH_Y, w - 2, 4);
+  g.fillStyle = BARK_TOP;  g.fillRect(1, BRANCH_Y, w - 2, 1);
+  g.fillStyle = BARK_DARK; g.fillRect(1, BRANCH_Y + 3, w - 2, 1);
+  g.fillStyle = "#241407";
+  g.fillRect(0, BRANCH_Y + 1, 1, 2); g.fillRect(w - 1, BRANCH_Y + 1, 1, 2);
+
+  // zwei dunkle Blattbueschel an den Astenden
+  const sprig = (x) => {
+    g.fillStyle = "#241407"; g.fillRect(x, BRANCH_Y + 4, 5, 3);
+    g.fillStyle = LEAF_B;    g.fillRect(x + 1, BRANCH_Y + 4, 3, 2);
+  };
+  sprig(3); sprig(32);
+
+  // Blume und Banane liegen vorne auf dem Ast, zuletzt gezeichnet
+  g.drawImage(SPR.flower, 8, 13);
+  g.drawImage(SPR.banana, 23, 13);
+
+  return cv;
 }
 
 /* ============================================================
@@ -287,17 +399,17 @@ function buildSprites() {
    ============================================================ */
 const HB_W = 9, HB_H = 14;
 const SPR_OFF_X = -3.5, SPR_OFF_Y = -2;
+const ITEM_W = 9, ITEM_H = 9;
 
 function makeMonkey(isPlayer) {
   return {
     isPlayer,
     x: 0, y: 0, vx: 0, vy: 0,
     face: 1,
-    onGround: false,
-    onVine: false,
+    onGround: false, onVine: false,
     dropTimer: 0,
-    it: false,
-    slip: 0, sniff: 0, immune: 0,
+    it: false, itCount: 0,
+    slip: 0, sniff: 0, freeze: 0, immune: 0,
     itemReady: true, itemTimer: 0,
     anim: 0, hurtFlash: 0
   };
@@ -339,11 +451,8 @@ function moveY(m, dy) {
         m.vy = 0;
         return;
       }
-      // Ast: hält nur, wenn man von oben kommt
       if (canLand && isPlatform(c, r) && prevBottom <= r * TILE + 1.5) {
-        m.y = r * TILE - HB_H;
-        m.onGround = true;
-        m.vy = 0;
+        m.y = r * TILE - HB_H; m.onGround = true; m.vy = 0;
         return;
       }
     }
@@ -361,48 +470,53 @@ function updateMonkey(m, dir, dt, speedMul) {
   }
 
   let inX = dir.x, inY = dir.y;
+  if (m.freeze > 0) { m.freeze -= dt; inX = 0; inY = 0; }
+  if (m.sniff > 0)  { m.sniff  -= dt; inX = 0; inY = 0; }
+  if (m.slip > 0)   { m.slip   -= dt; inX = 0; inY = 0; m.onVine = false; }
 
-  // Blume: bleibt stehen und schnuppert
-  if (m.sniff > 0) { m.sniff -= dt; inX = 0; inY = 0; }
-  // Banane: rutscht ohne Steuerung weiter
-  if (m.slip > 0) { m.slip -= dt; inX = 0; inY = 0; m.onVine = false; }
-
+  const blocked = m.freeze > 0 || m.sniff > 0 || m.slip > 0;
   const cen = centerTile(m);
-  const overVine = isVine(cen.c, cen.r) && m.slip <= 0 && m.sniff <= 0;
+  const footRow = Math.floor((m.y + HB_H + 1) / TILE);
+  const onHardGround = isGround(cen.c, footRow);
+  // Beim Ausrutschen verliert man den Halt. Wer nur innehaelt oder
+  // schnuppert, darf an der Liane haengen bleiben.
+  const overVine = isVine(cen.c, cen.r) && m.slip <= 0;
 
-  // Liane greifen und loslassen
+  // Liane greifen und loslassen. "Runter" greift nur, wenn es
+  // darunter ueberhaupt weitergeht — sonst klebt man unten fest.
   if (!overVine) m.onVine = false;
-  else if (inY !== 0) m.onVine = true;
+  else if (inY < 0) m.onVine = true;
+  else if (inY > 0 && !onHardGround) m.onVine = true;
   else if (m.onVine && inX !== 0) m.onVine = false;
 
   if (m.onVine) {
     m.vy = inY * CLIMB_SPEED * speedMul;
-    m.vx = 0;
+    // seitwaerts an der Liane bleibt erlaubt, sonst kann man
+    // sich nicht mehr davon loesen
+    m.vx = inX * CLIMB_SPEED * 0.85 * speedMul;
     m.onGround = false;
     m.dropTimer = 0;
-    // an der Liane ausrichten, damit das Klettern sauber aussieht
-    const target = cen.c * TILE + (TILE - HB_W) / 2;
-    m.x += (target - m.x) * Math.min(1, 14 * dt);
+    if (inX === 0) {
+      const target = cen.c * TILE + (TILE - HB_W) / 2;
+      m.x += (target - m.x) * Math.min(1, 14 * dt);
+    }
   } else {
     if (m.slip > 0) {
-      m.vx *= (1 - 1.6 * dt);           // rutscht aus, wenig Reibung
-    } else if (m.sniff > 0) {
+      m.vx *= (1 - 1.6 * dt);
+    } else if (blocked) {
       m.vx = 0;
     } else {
       m.vx = inX * RUN_SPEED * speedMul;
       if (inY < 0 && m.onGround) {
         m.vy = JUMP_VEL; m.onGround = false; blip(430, 0.05);
-      } else if (inY > 0 && m.onGround) {
-        // durch den Ast nach unten fallen lassen
-        m.dropTimer = DROP_TIME;
-        m.onGround = false;
-        m.vy = 40;
+      } else if (inY > 0 && m.onGround && !onHardGround) {
+        m.dropTimer = DROP_TIME; m.onGround = false; m.vy = 40;
       }
     }
     m.vy = Math.min(m.vy + GRAVITY * dt, MAX_FALL);
   }
 
-  if (inX !== 0 && m.slip <= 0 && m.sniff <= 0) m.face = inX > 0 ? 1 : -1;
+  if (inX !== 0 && !blocked) m.face = inX > 0 ? 1 : -1;
 
   m.onGround = false;
   moveX(m, m.vx * dt);
@@ -414,25 +528,27 @@ function updateMonkey(m, dir, dt, speedMul) {
 }
 
 /* ============================================================
-   Banane und Blume
+   Blume und Banane
    ============================================================ */
+function itemKindOf(m) { return m.isPlayer ? "flower" : "banana"; }
+
 function dropItem(m) {
-  if (!m.itemReady || m.sniff > 0 || m.slip > 0) return;
+  if (!m.itemReady || m.freeze > 0 || m.sniff > 0 || m.slip > 0) return;
   m.itemReady = false;
   m.itemTimer = ITEM_COOLDOWN;
   drops.push({
-    kind: m.isPlayer ? "banana" : "flower",
+    kind: itemKindOf(m),
     owner: m,
-    x: Math.max(0, Math.min(W - 7, m.x + HB_W / 2 - 3.5 - m.face * 6)),
-    y: m.y + HB_H - 7,
+    x: Math.max(0, Math.min(W - ITEM_W, m.x + HB_W / 2 - ITEM_W / 2 - m.face * 7)),
+    y: m.y + HB_H - ITEM_H,
     vy: 0, life: ITEM_LIFE, born: 0
   });
   blip(300, 0.05);
 }
 
 function itemHits(d, m) {
-  return d.x + 6 > m.x && d.x + 1 < m.x + HB_W &&
-         d.y + 7 > m.y && d.y + 1 < m.y + HB_H;
+  return d.x + ITEM_W - 1 > m.x && d.x + 1 < m.x + HB_W &&
+         d.y + ITEM_H - 1 > m.y && d.y + 1 < m.y + HB_H;
 }
 
 function updateDrops(dt) {
@@ -440,14 +556,13 @@ function updateDrops(dt) {
     const d = drops[i];
     d.life -= dt; d.born += dt;
 
-    // fällt, bis ein Ast oder der Boden trägt
-    const prevBottom = d.y + 7;
+    const prevBottom = d.y + ITEM_H;
     d.vy = Math.min(d.vy + GRAVITY * dt, MAX_FALL);
     d.y += d.vy * dt;
-    const c = Math.floor((d.x + 3.5) / TILE);
-    const r = Math.floor((d.y + 6) / TILE);
+    const c = Math.floor((d.x + ITEM_W / 2) / TILE);
+    const r = Math.floor((d.y + ITEM_H - 1) / TILE);
     if (isGround(c, r) || (isPlatform(c, r) && prevBottom <= r * TILE + 2)) {
-      d.y = r * TILE - 7; d.vy = 0;
+      d.y = r * TILE - ITEM_H; d.vy = 0;
     }
     if (d.y > H) { drops.splice(i, 1); continue; }
 
@@ -458,15 +573,14 @@ function updateDrops(dt) {
         victim.onVine = false;
         const s = (Math.abs(victim.vx) > 4) ? Math.sign(victim.vx) : victim.face;
         victim.vx = s * RUN_SPEED * 1.3;
-        burst(d.x + 3, d.y + 3, "#f5d13b", 9);
-        toast(victim.isPlayer ? "Ausgerutscht!" : "Er rutscht aus!", "#f5d13b");
+        burst(d.x + 4, d.y + 4, "#f5d13b", 10);
+        toast(victim.isPlayer ? "You slipped!" : "He slipped!", "#f5d13b");
         blip(170, 0.14);
       } else {
         victim.sniff = SNIFF_TIME;
         victim.vx = 0;
-        victim.onVine = false;
-        burst(d.x + 3, d.y + 3, "#fdfdf5", 9);
-        toast(victim.isPlayer ? "Duftet zu gut..." : "Er schnuppert!", "#fdfdf5");
+        burst(d.x + 4, d.y + 4, "#fdfdf5", 10);
+        toast(victim.isPlayer ? "Smells too good..." : "He stops to sniff!", "#fdfdf5");
         blip(660, 0.14);
       }
       drops.splice(i, 1);
@@ -556,7 +670,6 @@ function updateAI(dt) {
       aiDir.y = rival.it ? Math.sign(player.y - rival.y) : 0;
     }
 
-    // kurzes Zögern, damit er schlagbar bleibt
     if (aiPause <= 0 && Math.random() < 0.05) aiPause = 0.22;
 
     const dist = Math.hypot(player.x - rival.x, player.y - rival.y);
@@ -591,14 +704,14 @@ function inputDir() {
 /* ============================================================
    Ablauf
    ============================================================ */
-const STATE = { TITLE: 0, COUNT: 1, PLAY: 2, OVER: 3 };
+const STATE = { TITLE: 0, PLAY: 1, OVER: 2 };
 let state = STATE.TITLE;
-let score = 0, timeLeft = ROUND_TIME, countdown = 3, best = 0;
+let score = 0, best = 0;
 try { best = parseInt(localStorage.getItem("affenjagd_best") || "0", 10) || 0; } catch (e) { best = 0; }
 
 function resetRound() {
   drops = []; particles = [];
-  score = 0; timeLeft = ROUND_TIME; countdown = 3;
+  score = 0;
   toastText = ""; toastTime = 0;
 
   player = makeMonkey(true);
@@ -611,9 +724,12 @@ function resetRound() {
   rival.x = 2 * TILE;
   rival.y = topRow * TILE - HB_H;
 
-  rival.it = true;              // der graue Affe jagt zuerst
-  player.it = false;
-  rival.immune = 0.6;
+  // Der Gegner faengt an. Das zaehlt als seine erste Runde als Faenger.
+  rival.it = true;  rival.itCount = 1;
+  player.it = false; player.itCount = 0;
+  rival.freeze = START_FREEZE;
+  rival.immune = START_FREEZE;
+
   navTimer = 0; aiDir.x = 0; aiDir.y = 0; aiPause = 0;
 }
 
@@ -621,22 +737,35 @@ function swapRoles(tagger) {
   const other = (tagger === player) ? rival : player;
   tagger.it = false;
   other.it = true;
+  other.itCount++;
   tagger.immune = TAG_IMMUNE;
   other.immune = TAG_IMMUNE;
+  // Der neue Faenger haelt kurz inne, damit der andere wegkommt
+  other.freeze = FREEZE_TIME;
   other.hurtFlash = 0.4;
-
-  const dir = Math.sign(other.x - tagger.x) || 1;
-  other.vx = dir * RUN_SPEED * 1.1;
+  tagger.vx = 0;
 
   if (tagger === player) {
     score += TAG_BONUS;
-    toast("Gefangen! +" + TAG_BONUS, "#ffe066");
+    toast("Tagged him! +" + TAG_BONUS, "#ffe066");
     blip(880, 0.13);
   } else {
-    toast("Du bist es! Lauf!", "#ff6b5a");
+    toast("You're it! Run!", "#ff6b5a");
     blip(150, 0.2);
   }
-  burst(other.x + HB_W / 2, other.y + HB_H / 2, "#ffe066", 12);
+  burst(other.x + HB_W / 2, other.y + HB_H / 2, "#ff6b5a", 14);
+
+  if (player.itCount >= IT_TARGET && rival.itCount >= IT_TARGET) endRound();
+}
+
+function endRound() {
+  state = STATE.OVER;
+  const s = Math.floor(score);
+  if (s > best) {
+    best = s;
+    try { localStorage.setItem("affenjagd_best", String(best)); } catch (e) {}
+  }
+  blip(660, 0.25);
 }
 
 function checkTag() {
@@ -653,13 +782,12 @@ function checkTag() {
    ============================================================ */
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d", { alpha: false });
-let scale = 1, bgCache = null;
+let scale = 1, bgCache = null, clock = 0;
 
 function layout() {
   const vw = window.innerWidth, vh = window.innerHeight;
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
 
-  // Höhe an das Gerät anpassen, damit der Baum den Bildschirm füllt
   let rows = Math.round((W * vh / vw) / TILE);
   rows = Math.max(28, Math.min(46, rows));
   const rebuild = (rows !== ROWS) || !grid;
@@ -674,14 +802,14 @@ function layout() {
   ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
   ctx.imageSmoothingEnabled = false;
 
-  itemBtn.x = W - 28; itemBtn.y = H - 26;
+  itemBtn.x = 28; itemBtn.y = H - 26;
 
   if (rebuild) {
     buildMap();
     buildNav();
     bgCache = null;
     resetRound();
-    if (state === STATE.PLAY || state === STATE.COUNT) state = STATE.TITLE;
+    if (state === STATE.PLAY) state = STATE.TITLE;
   }
 }
 
@@ -699,34 +827,29 @@ function drawBackground() {
   grad.addColorStop(1, SKY_BOTTOM);
   g.fillStyle = grad; g.fillRect(0, 0, W, H);
 
-  // Blätterwerk im Hintergrund
+  // dichtes, dunkles Blattwerk als Tiefe
   let s2 = 4242;
   const r2 = () => { s2 = (s2 * 1103515245 + 12345) >>> 0; return s2 / 4294967296; };
-  g.globalAlpha = 0.16;
-  for (let i = 0; i < 110; i++) {
+  g.globalAlpha = 0.2;
+  for (let i = 0; i < 150; i++) {
     const x = Math.floor(r2() * W), y = Math.floor(r2() * H);
     g.fillStyle = r2() > 0.5 ? LEAF_A : LEAF_B;
-    g.fillRect(x, y, 6 + Math.floor(r2() * 14), 4 + Math.floor(r2() * 8));
+    g.fillRect(x, y, 5 + Math.floor(r2() * 16), 3 + Math.floor(r2() * 9));
   }
   g.globalAlpha = 1;
 
-  // Stamm als Deko
   g.fillStyle = "rgba(58,36,17,0.4)";
   g.fillRect(Math.floor(W / 2) - 13, 0, 26, H);
 
-  // Lianen zuerst, damit sie hinter den Ästen liegen
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       if (!vines[r][c]) continue;
       const x = c * TILE, y = r * TILE;
       g.fillStyle = VINE_B; g.fillRect(x + 3, y, 4, TILE);
       g.fillStyle = VINE_A; g.fillRect(x + 4, y, 2, TILE);
-      if ((r + c) % 3 === 0) { g.fillStyle = LEAF_A; g.fillRect(x + 7, y + 3, 3, 2); }
-      if ((r + c) % 4 === 1) { g.fillStyle = LEAF_B; g.fillRect(x, y + 6, 3, 2); }
     }
   }
 
-  // Äste und Boden
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       const t = grid[r][c];
@@ -737,8 +860,6 @@ function drawBackground() {
         g.fillStyle = BARK_DARK; g.fillRect(x, y + 5, TILE, 2);
         g.fillStyle = "rgba(0,0,0,0.12)";
         g.fillRect(x + ((c * 5) % 7), y + 3, 1, 2);
-        if (c % 4 === 1) { g.fillStyle = LEAF_A; g.fillRect(x + 2, y - 2, 6, 2); }
-        if (c % 7 === 3) { g.fillStyle = LEAF_B; g.fillRect(x + 1, y + 7, 4, 2); }
       } else if (t === "#") {
         g.fillStyle = EARTH; g.fillRect(x, y, TILE, TILE);
         if (r === ROWS - 2) { g.fillStyle = GRASS; g.fillRect(x, y, TILE, 3); }
@@ -750,6 +871,16 @@ function drawBackground() {
 
   bgCache = cv;
   ctx.drawImage(bgCache, 0, 0);
+}
+
+function drawLeaves() {
+  for (let i = 0; i < leaves.length; i++) {
+    const l = leaves[i];
+    const dx = Math.sin(clock * l.sp + l.phase) * l.amp;
+    const dy = Math.cos(clock * l.sp * 0.6 + l.phase) * l.amp * 0.45;
+    ctx.fillStyle = l.col;
+    ctx.fillRect(Math.round(l.x + dx), Math.round(l.y + dy), l.w, l.h);
+  }
 }
 
 function drawSprite(cv, x, y, flip) {
@@ -765,6 +896,11 @@ function drawSprite(cv, x, y, flip) {
   }
 }
 
+function drawSpriteScaled(cv, x, y, k) {
+  ctx.drawImage(cv, 0, 0, cv.width, cv.height,
+                Math.round(x), Math.round(y), cv.width * k, cv.height * k);
+}
+
 function drawMonkey(m) {
   const spr = m.isPlayer ? SPR.player : SPR.rival;
   let bob = 0;
@@ -774,30 +910,25 @@ function drawMonkey(m) {
   const sx = m.x + SPR_OFF_X;
   const sy = m.y + SPR_OFF_Y + bob;
 
-  // Pfeil über dem Kopf zeigt, wer "es" ist
+  // rotes Herz ueber dem Kopf zeigt, wer "es" ist
   if (m.it) {
-    const ax = Math.round(m.x + HB_W / 2);
-    const ay = Math.round(m.y - 10 + Math.sin(m.anim * 7) * 1.5);
-    ctx.fillStyle = "#2b1a0e";
-    for (let i = 0; i < 5; i++) ctx.fillRect(ax - 4 + i, ay - 1 + i, 9 - 2 * i, 1);
-    ctx.fillStyle = "#ff4d3a";
-    for (let i = 0; i < 4; i++) ctx.fillRect(ax - 3 + i, ay + i, 7 - 2 * i, 1);
+    const hx = m.x + HB_W / 2 - 3.5;
+    const hy = m.y - 10 + Math.sin(m.anim * 5) * 1.4;
+    drawSprite(SPR.heart, hx, hy, 1);
   }
 
   if (m.hurtFlash > 0 && Math.floor(m.hurtFlash * 20) % 2 === 0) ctx.globalAlpha = 0.45;
-  else if (m.immune > 0 && Math.floor(m.immune * 12) % 2 === 0) ctx.globalAlpha = 0.6;
+  else if (m.immune > 0 && Math.floor(m.immune * 12) % 2 === 0) ctx.globalAlpha = 0.62;
   drawSprite(spr, sx, sy, m.face);
   ctx.globalAlpha = 1;
 
-  // getragenes Item
   if (m.itemReady) {
-    const isp = m.isPlayer ? SPR.banana : SPR.flower;
-    const ix = m.face > 0 ? m.x + HB_W - 2 : m.x - 5;
-    const iy = m.y + 4 + Math.sin(m.anim * 5) * 0.7;
+    const isp = m.isPlayer ? SPR.flower : SPR.banana;
+    const ix = m.face > 0 ? m.x + HB_W - 1 : m.x - ITEM_W + 1;
+    const iy = m.y + 5 + Math.sin(m.anim * 5) * 0.7;
     drawSprite(isp, ix, iy, m.face);
   }
 
-  // Zustand über dem Kopf
   if (m.sniff > 0) {
     ctx.fillStyle = "#ff9ec4";
     const t = Math.sin(m.anim * 8) * 2;
@@ -807,6 +938,10 @@ function drawMonkey(m) {
     ctx.fillStyle = "#f5d13b";
     ctx.fillRect(Math.round(m.x + 4), Math.round(m.y - 9), 2, 5);
     ctx.fillRect(Math.round(m.x + 4), Math.round(m.y - 3), 2, 2);
+  } else if (m.freeze > 0) {
+    ctx.fillStyle = "#cfe8d4";
+    const n = Math.floor(m.freeze * 4) % 3;
+    for (let i = 0; i <= n; i++) ctx.fillRect(Math.round(m.x + 1 + i * 3), Math.round(m.y - 5), 2, 2);
   }
 }
 
@@ -834,17 +969,27 @@ function text(str, x, y, col, align, size) {
   ctx.fillText(str, Math.round(x), Math.round(y));
 }
 
+// Drei Herzen zeigen, wie oft jemand schon Faenger war
+function drawHeartRow(x, y, count) {
+  for (let i = 0; i < IT_TARGET; i++) {
+    drawSprite(i < count ? SPR.heart : SPR.heartOff, x + i * 8, y, 1);
+  }
+}
+
 function drawHUD() {
-  ctx.fillStyle = "rgba(6,14,10,0.72)";
-  ctx.fillRect(0, 0, W, HUD_ROWS * TILE - 6);
+  ctx.fillStyle = "rgba(6,14,10,0.74)";
+  ctx.fillRect(0, 0, W, HUD_ROWS * TILE - 5);
 
-  text("PUNKTE " + Math.floor(score), 4, 3, "#ffe066", "left", 8);
-  const t = Math.max(0, Math.ceil(timeLeft));
-  text(t + "s", W - 4, 3, t <= 10 ? "#ff6b5a" : "#cfe8d4", "right", 8);
-  text("BEST " + best, 4, 13, "#7fa88a", "left", 7);
+  text("SCORE " + Math.floor(score), 3, 2, "#ffe066", "left", 8);
+  text("BEST " + best, W - 3, 2, "#7fa88a", "right", 7);
 
-  if (player.it) text("DU BIST ES - FANG IHN!", W / 2, 22, "#ff6b5a", "center", 8);
-  else           text("LAUF WEG!", W / 2, 22, "#8ef2a0", "center", 8);
+  text("YOU", 3, 13, "#cfe8d4", "left", 7);
+  drawHeartRow(18, 12, player.itCount);
+  drawHeartRow(W - 42, 12, rival.itCount);
+  text("HIM", W - 3, 13, "#cfe8d4", "right", 7);
+
+  if (player.it) text("YOU'RE IT - CATCH HIM!", W / 2, 23, "#ff6b5a", "center", 8);
+  else           text("RUN!", W / 2, 23, "#8ef2a0", "center", 8);
 
   if (toastTime > 0) {
     ctx.globalAlpha = Math.min(1, toastTime * 1.6);
@@ -868,27 +1013,27 @@ function drawItemButton() {
   const ready = player.itemReady;
   ctx.beginPath();
   ctx.arc(itemBtn.x, itemBtn.y, itemBtn.r, 0, Math.PI * 2);
-  ctx.fillStyle = ready ? "rgba(245,209,59,0.2)" : "rgba(255,255,255,0.07)";
+  ctx.fillStyle = ready ? "rgba(253,253,245,0.18)" : "rgba(255,255,255,0.07)";
   ctx.fill();
-  ctx.strokeStyle = ready ? "rgba(245,209,59,0.8)" : "rgba(255,255,255,0.18)";
+  ctx.strokeStyle = ready ? "rgba(253,253,245,0.8)" : "rgba(255,255,255,0.18)";
   ctx.lineWidth = 1;
   ctx.stroke();
 
   if (ready) {
-    drawSprite(SPR.banana, itemBtn.x - 3.5, itemBtn.y - 3.5, 1);
+    drawSprite(SPR.flower, itemBtn.x - ITEM_W / 2, itemBtn.y - ITEM_H / 2, 1);
   } else {
     const frac = 1 - player.itemTimer / ITEM_COOLDOWN;
     ctx.beginPath();
     ctx.arc(itemBtn.x, itemBtn.y, itemBtn.r - 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-    ctx.strokeStyle = "rgba(245,209,59,0.55)";
+    ctx.strokeStyle = "rgba(253,253,245,0.55)";
     ctx.stroke();
   }
 }
 
-function drawPanel(lines) {
+function drawPanel(lines, startY) {
   ctx.fillStyle = "rgba(6,14,10,0.87)";
   ctx.fillRect(0, 0, W, H);
-  let y = H * 0.2;
+  let y = startY !== undefined ? startY : H * 0.2;
   for (const l of lines) {
     text(l.t, W / 2, y, l.c, "center", l.s || 8);
     y += (l.s || 8) + (l.gap || 5);
@@ -897,41 +1042,51 @@ function drawPanel(lines) {
 
 function drawTitle() {
   drawBackground();
+  drawLeaves();
   drawPanel([
-    { t: "AFFENJAGD",              c: "#ffe066", s: 16, gap: 9 },
-    { t: "Fangis auf dem Baum",    c: "#8ef2a0", s: 8,  gap: 14 },
-    { t: "Der graue Affe jagt dich.", c: "#e8e8e8", s: 8 },
-    { t: "Beruehrung tauscht die",  c: "#e8e8e8", s: 8 },
-    { t: "Rollen. Punkte gibt es",  c: "#e8e8e8", s: 8 },
-    { t: "nur in Freiheit.",        c: "#e8e8e8", s: 8, gap: 14 },
-    { t: "Daumen ziehen: laufen",   c: "#cfe8d4", s: 8 },
-    { t: "an der Liane: klettern",  c: "#cfe8d4", s: 8 },
-    { t: "runter auf dem Ast:",     c: "#cfe8d4", s: 8 },
-    { t: "durchfallen lassen",      c: "#cfe8d4", s: 8, gap: 14 },
-    { t: "Banane: er rutscht aus",  c: "#f5d13b", s: 8 },
-    { t: "Seine Blume: du bleibst", c: "#fdfdf5", s: 8 },
-    { t: "stehen und schnupperst",  c: "#fdfdf5", s: 8, gap: 16 },
-    { t: "TIPPEN ZUM STARTEN",      c: "#ffe066", s: 10 }
-  ]);
+    { t: "MONKEY CHASE",            c: "#ffe066", s: 15, gap: 9 },
+    { t: "Tag in the treetops",     c: "#8ef2a0", s: 8,  gap: 13 },
+    { t: "Whoever wears the red",   c: "#e8e8e8", s: 8 },
+    { t: "heart has to catch.",     c: "#e8e8e8", s: 8 },
+    { t: "Play until each of you",  c: "#e8e8e8", s: 8 },
+    { t: "has been it three times.", c: "#e8e8e8", s: 8, gap: 13 },
+    { t: "Drag your thumb to run",  c: "#cfe8d4", s: 8 },
+    { t: "On a vine: climb",        c: "#cfe8d4", s: 8 },
+    { t: "On a branch, press down", c: "#cfe8d4", s: 8 },
+    { t: "to drop through",         c: "#cfe8d4", s: 8, gap: 13 },
+    { t: "Your flower makes him",   c: "#fdfdf5", s: 8 },
+    { t: "stop and sniff",          c: "#fdfdf5", s: 8 },
+    { t: "His banana makes you slip", c: "#f5d13b", s: 8, gap: 15 },
+    { t: "TAP TO START",            c: "#ffe066", s: 10 }
+  ], H * 0.14);
 }
 
 function drawOver() {
   drawBackground();
-  drawPanel([
-    { t: "ZEIT UM!", c: "#ffe066", s: 16, gap: 14 },
-    { t: "PUNKTE",   c: "#cfe8d4", s: 8,  gap: 3 },
-    { t: String(Math.floor(score)), c: "#8ef2a0", s: 22, gap: 14 },
-    { t: Math.floor(score) >= best ? "NEUER REKORD!" : "BEST " + best,
-      c: Math.floor(score) >= best ? "#ffe066" : "#7fa88a", s: 9, gap: 20 },
-    { t: "TIPPEN FUER NEUE RUNDE", c: "#ffe066", s: 9 }
-  ]);
-}
-
-function drawCountdown() {
-  ctx.fillStyle = "rgba(6,14,10,0.4)";
+  drawLeaves();
+  ctx.fillStyle = "rgba(6,14,10,0.88)";
   ctx.fillRect(0, 0, W, H);
-  const n = Math.ceil(countdown);
-  text(n > 0 ? String(n) : "LOS!", W / 2, H / 2 - 14, "#ffe066", "center", 24);
+
+  const top = Math.round(H * 0.09);
+  const hk = 6;                           // Herz
+  const k = 4;                            // Endbild vergroessert
+  const sh = SPR.hug.height * k;
+  const heartY = top + 16 + Math.sin(clock * 2.2) * 3;
+  const sy = top + 20 + SPR.heart.height * hk;
+
+  text("FRIENDS AGAIN", W / 2, top, "#ff8f7a", "center", 10);
+  drawSpriteScaled(SPR.heart, W / 2 - (SPR.heart.width * hk) / 2, heartY, hk);
+  drawSpriteScaled(SPR.hug, (W - SPR.hug.width * k) / 2, sy, k);
+
+  let y = sy + sh + 14;
+  text("Each of you was it", W / 2, y, "#cfe8d4", "center", 8); y += 10;
+  text("three times.", W / 2, y, "#cfe8d4", "center", 8); y += 20;
+  text("SCORE", W / 2, y, "#cfe8d4", "center", 8); y += 12;
+  text(String(Math.floor(score)), W / 2, y, "#8ef2a0", "center", 20); y += 28;
+  const s = Math.floor(score);
+  text(s >= best ? "NEW RECORD!" : "BEST " + best,
+       W / 2, y, s >= best ? "#ffe066" : "#7fa88a", "center", 9); y += 20;
+  text("TAP FOR A NEW ROUND", W / 2, y, "#ffe066", "center", 9);
 }
 
 function render() {
@@ -939,6 +1094,7 @@ function render() {
   if (state === STATE.OVER)  { drawOver();  return; }
 
   drawBackground();
+  drawLeaves();
   drawDrops();
   drawMonkey(rival);
   drawMonkey(player);
@@ -946,7 +1102,6 @@ function render() {
   drawHUD();
   drawItemButton();
   drawStick();
-  if (state === STATE.COUNT) drawCountdown();
 }
 
 /* ============================================================
@@ -957,30 +1112,15 @@ function frame(ts) {
   if (!last) last = ts;
   let dt = (ts - last) / 1000;
   last = ts;
-  if (dt > 1 / 20) dt = 1 / 20;      // nach Pause nicht springen
+  if (dt > 1 / 20) dt = 1 / 20;
+  clock += dt;
 
-  if (state === STATE.COUNT) {
-    countdown -= dt;
-    updateMonkey(player, { x: 0, y: 0 }, dt, 1);
-    updateMonkey(rival,  { x: 0, y: 0 }, dt, 1);
-    if (countdown <= -0.6) state = STATE.PLAY;
-  } else if (state === STATE.PLAY) {
-    timeLeft -= dt;
+  if (state === STATE.PLAY) {
     if (!player.it) score += dt * PTS_PER_SEC;
     updateMonkey(player, inputDir(), dt, 1);
     updateAI(dt);
     updateDrops(dt);
     checkTag();
-    if (timeLeft <= 0) {
-      timeLeft = 0;
-      state = STATE.OVER;
-      const s = Math.floor(score);
-      if (s > best) {
-        best = s;
-        try { localStorage.setItem("affenjagd_best", String(best)); } catch (e) {}
-      }
-      blip(520, 0.3);
-    }
   }
 
   if (toastTime > 0) toastTime -= dt;
@@ -997,22 +1137,22 @@ function toLogical(cx, cy) {
   return { x: (cx - r.left) / (r.width / W), y: (cy - r.top) / (r.height / H) };
 }
 
-function startOrRestart() {
+function startRound() {
   initAudio();
   if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
   resetRound();
-  state = STATE.COUNT;
+  state = STATE.PLAY;
 }
 
 function onDown(id, cx, cy) {
-  if (state === STATE.TITLE || state === STATE.OVER) { startOrRestart(); return; }
+  if (state === STATE.TITLE || state === STATE.OVER) { startRound(); return; }
   const p = toLogical(cx, cy);
   if (Math.hypot(p.x - itemBtn.x, p.y - itemBtn.y) <= itemBtn.r + 4) { dropItem(player); return; }
   if (stickId === null) {
     stickId = id; stickOX = p.x; stickOY = p.y; stickX = p.x; stickY = p.y;
     stickActive = true;
   } else {
-    dropItem(player);        // zweiter Finger irgendwo wirft das Item
+    dropItem(player);
   }
 }
 function onMove(id, cx, cy) {
@@ -1050,7 +1190,7 @@ window.addEventListener("keydown", e => {
     if (state === STATE.PLAY) dropItem(player);
     e.preventDefault();
   }
-  if (e.key === "Enter" && (state === STATE.TITLE || state === STATE.OVER)) startOrRestart();
+  if (e.key === "Enter" && (state === STATE.TITLE || state === STATE.OVER)) startRound();
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(e.key) >= 0) e.preventDefault();
 });
 window.addEventListener("keyup", e => { keys[e.key] = false; });
