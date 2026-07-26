@@ -69,7 +69,7 @@ const GRAVITY       = 430;
 const JUMP_VEL      = -145;
 const MAX_FALL      = 290;
 const DROP_TIME     = 0.28;
-const FREEZE_TIME   = 5.0;    // Vorsprung fuer den Geflohenen
+const FREEZE_TIME   = 3.0;    // Vorsprung fuer den Geflohenen
 const START_FREEZE  = 2.0;
 const TAG_IMMUNE    = 0.8;    // nur gegen sofortiges Zurueckfangen
 const SLIP_TIME     = 1.1;    // Banane
@@ -77,6 +77,8 @@ const SNIFF_TIME    = 1.4;    // Blume
 const ITEM_COOLDOWN = 6.0;
 const ITEM_LIFE     = 9.0;
 const AI_SPEED_MUL  = 0.87;   // der Rechner laeuft langsamer als du
+const AI_FLEE_MUL   = 0.78;   // auf der Flucht noch etwas langsamer,
+                              // sonst ist er nicht zu stellen
 const PTS_PER_SEC   = 10;
 const TAG_BONUS     = 25;
 
@@ -199,7 +201,7 @@ function buildLeaves() {
 /* ============================================================
    Navigationsgraph fuer den Gegner
    ============================================================ */
-let adj = [], radj = [], distField = null;
+let adj = [], radj = [], distToPlayer = null, distToRefuge = null;
 function idx(c, r) { return r * COLS + c; }
 function navFree(c, r) { return inside(c, r) && !isGround(c, r); }
 function navSupported(c, r) {
@@ -224,12 +226,15 @@ function buildNav() {
     }
   }
   for (let i = 0; i < n; i++) for (const j of adj[i]) radj[j].push(i);
-  distField = new Int32Array(n);
+  distToPlayer = new Int32Array(n);
+  distToRefuge = new Int32Array(n);
 }
 
+// field[X] = Anzahl Schritte von Kachel X bis zum Ziel. Deshalb wird
+// vom Ziel aus ueber die umgekehrten Kanten gesucht.
 const bfsQueue = [];
-function computeField(tc, tr) {
-  distField.fill(-1);
+function computeField(tc, tr, field) {
+  field.fill(-1);
   if (!inside(tc, tr)) return;
   let start = idx(tc, tr);
   if (!navFree(tc, tr)) {
@@ -243,14 +248,14 @@ function computeField(tc, tr) {
   }
   bfsQueue.length = 0;
   bfsQueue.push(start);
-  distField[start] = 0;
+  field[start] = 0;
   let head = 0;
   while (head < bfsQueue.length) {
     const cur = bfsQueue[head++];
-    const d = distField[cur] + 1;
+    const d = field[cur] + 1;
     const nb = radj[cur];
     for (let k = 0; k < nb.length; k++) {
-      if (distField[nb[k]] === -1) { distField[nb[k]] = d; bfsQueue.push(nb[k]); }
+      if (field[nb[k]] === -1) { field[nb[k]] = d; bfsQueue.push(nb[k]); }
     }
   }
 }
@@ -648,44 +653,110 @@ function blip(freq, dur) {
    Gegner
    ============================================================ */
 let navTimer = 0, aiPause = 0;
+let refugeC = -1, refugeR = -1, refugeTimer = 0, refugeCooldown = 0;
+let aiHoldX = 0, aiHoldTimer = 0;
+
+// Ein festes Ziel weit weg vom Spieler suchen. Frueher wurde beim
+// Fliehen jeden Frame gierig das weiteste Nachbarfeld genommen — dabei
+// wechseln sich zwei benachbarte Felder staendig als "das weiteste" ab
+// und die Figur zappelt dazwischen, bis sie in der untersten Ecke
+// kreiselt. Mit einem festen Ziel laeuft sie ruhig und zielgerichtet.
+function pickRefuge() {
+  let max = 0;
+  for (let i = 0; i < distToPlayer.length; i++) if (distToPlayer[i] > max) max = distToPlayer[i];
+  if (max < 3) return false;
+
+  // Nicht immer der sicherste Ort: sonst ist er kaum zu stellen und
+  // die Runde zieht sich. Ab und zu waehlt er absichtlich mittelmaessig.
+  const faktor = (Math.random() < 0.35) ? 0.25 : 0.55;
+  const schwelle = Math.max(3, Math.floor(max * faktor));
+  const kandidaten = [];
+  for (let i = 0; i < distToPlayer.length; i++) {
+    if (distToPlayer[i] < schwelle) continue;
+    const c = i % COLS, r = (i - c) / COLS;
+    if (!navSupported(c, r)) continue;      // nur Felder, auf denen man stehen kann
+    kandidaten.push(i);
+  }
+  if (!kandidaten.length) return false;
+
+  const wahl = kandidaten[Math.floor(Math.random() * kandidaten.length)];
+  refugeC = wahl % COLS;
+  refugeR = (wahl - refugeC) / COLS;
+  computeField(refugeC, refugeR, distToRefuge);
+  refugeTimer = 1.5 + Math.random();
+  refugeCooldown = 0.4;
+  return true;
+}
 
 function updateAI(dt) {
   navTimer -= dt;
   aiPause -= dt;
+  refugeTimer -= dt;
+  refugeCooldown -= dt;
 
   // Das Entfernungsfeld ist teuer und darf altern.
   if (navTimer <= 0) {
     navTimer = 0.12;
     const pt = centerTile(player);
-    computeField(pt.c, pt.r);
+    computeField(pt.c, pt.r, distToPlayer);
 
     if (aiPause <= 0 && Math.random() < 0.05) aiPause = 0.22;
     const dist = Math.hypot(player.x - rival.x, player.y - rival.y);
     if (rival.itemReady && dist < (rival.it ? 58 : 44) && Math.random() < 0.3) dropItem(rival);
   }
 
-  // Die Richtung dagegen jeden Frame neu aus der aktuellen Kachel
-  // ableiten. Sonst haelt die Figur nach einer Landung noch kurz die
+  const rt = centerTile(rival);
+  const here = inside(rt.c, rt.r) ? idx(rt.c, rt.r) : -1;
+
+  // Fluchtziel pflegen: neu waehlen, wenn erreicht, abgelaufen,
+  // unerreichbar oder der Verfolger dicht dran ist.
+  if (!rival.it && here >= 0) {
+    const erreicht  = (rt.c === refugeC && rt.r === refugeR);
+    const bedraengt = distToPlayer[here] >= 0 && distToPlayer[here] <= 3;
+    if (refugeC < 0 || erreicht || refugeTimer <= 0 ||
+        distToRefuge[here] < 0 || (bedraengt && refugeCooldown <= 0)) {
+      pickRefuge();
+    }
+  }
+
+  // Die Richtung jeden Frame neu aus der aktuellen Kachel ableiten.
+  // Sonst haelt die Figur nach einer Landung noch kurz die
   // Abwaerts-Eingabe von unterwegs — und "runter" auf einem Ast heisst
   // durchfallen. So sackte sie Ebene um Ebene bis nach unten durch.
-  const rt = centerTile(rival);
   let dirX = 0, dirY = 0;
-  if (distField && inside(rt.c, rt.r)) {
-    const options = adj[idx(rt.c, rt.r)] || [];
-    let bestScore = rival.it ? Infinity : -Infinity, best = -1;
+  if (here >= 0) {
+    const feld = rival.it ? distToPlayer : distToRefuge;
+    const options = adj[here] || [];
+    let bestScore = Infinity, best = -1;
     for (const nb of options) {
-      const d = distField[nb];
-      if (d === -1) continue;
-      if (rival.it ? (d < bestScore) : (d > bestScore)) { bestScore = d; best = nb; }
+      const v = feld[nb];
+      if (v < 0) continue;
+      if (v < bestScore) { bestScore = v; best = nb; }
     }
     if (best >= 0) {
       const bc = best % COLS, br = (best - bc) / COLS;
-      dirX = Math.sign(bc - rt.c);
+      // Auf die Mitte der Zielkachel zielen statt nur aufs Vorzeichen.
+      // Steht das Ziel senkrecht ueber oder unter uns, faellt die
+      // Seitwaertsbewegung damit von selbst weg.
+      const zielX = bc * TILE + TILE / 2;
+      const mitteX = rival.x + HB_W / 2;
+      dirX = (Math.abs(zielX - mitteX) < 3.5) ? 0 : Math.sign(zielX - mitteX);
       dirY = Math.sign(br - rt.r);
     } else {
-      dirX = Math.sign(player.x - rival.x);
-      dirY = rival.it ? Math.sign(player.y - rival.y) : 0;
+      dirX = Math.sign(player.x - rival.x) * (rival.it ? 1 : -1);
+      dirY = 0;
     }
+  }
+
+  // Kurze Bindung an die Laufrichtung. An einer Kachelgrenze kann das
+  // Entfernungsfeld sonst zwischen links und rechts kippen, und die
+  // Figur zappelt mit 25 Wechseln pro Sekunde auf der Stelle.
+  aiHoldTimer -= dt;
+  if (dirX === 0) {
+    aiHoldX = 0;
+  } else if (dirX !== aiHoldX) {
+    if (aiHoldTimer <= 0) { aiHoldX = dirX; aiHoldTimer = 0.22; }
+    else dirX = aiHoldX;
   }
 
   // In der Luft keine senkrechte Eingabe, sonst faellt sie beim
@@ -695,7 +766,8 @@ function updateAI(dt) {
   if (airborne) dirY = 0;
   else if (dirY < 0 && !isVine(rt.c, rt.r)) dirY = 0;
 
-  updateMonkey(rival, (aiPause > 0) ? { x: 0, y: 0 } : { x: dirX, y: dirY }, dt, AI_SPEED_MUL);
+  const tempo = rival.it ? AI_SPEED_MUL : AI_FLEE_MUL;
+  updateMonkey(rival, (aiPause > 0) ? { x: 0, y: 0 } : { x: dirX, y: dirY }, dt, tempo);
 }
 
 /* ============================================================
@@ -750,6 +822,8 @@ function resetRound() {
   rival.immune = START_FREEZE;
 
   navTimer = 0; aiPause = 0;
+  refugeC = -1; refugeR = -1; refugeTimer = 0; refugeCooldown = 0;
+  aiHoldX = 0; aiHoldTimer = 0;
 }
 
 function swapRoles(tagger) {
@@ -933,11 +1007,18 @@ function drawSpriteScaled(cv, x, y, k) {
                 Math.round(x), Math.round(y), cv.width * k, cv.height * k);
 }
 
+// Zweitakt statt Sinus. Ein Sinus mit weniger als einem Pixel
+// Ausschlag wird beim Runden auf ganze Pixel zu Geflacker; ein fester
+// Takt sieht nach Schritt aus.
+function stepBob(anim, takt) {
+  return (Math.floor(anim / takt) % 2) ? -1 : 0;
+}
+
 function drawMonkey(m) {
   const spr = m.isPlayer ? SPR.player : SPR.rival;
   let bob = 0;
-  if (m.onVine && Math.abs(m.vy) > 1) bob = Math.sin(m.anim * 16);
-  else if (m.onGround && Math.abs(m.vx) > 1) bob = Math.sin(m.anim * 18);
+  const laeuft = (m.onVine && Math.abs(m.vy) > 1) || (m.onGround && Math.abs(m.vx) > 1);
+  if (laeuft) bob = stepBob(m.anim, 0.28);
 
   const sx = m.x + SPR_OFF_X;
   const sy = m.y + SPR_OFF_Y + bob;
@@ -945,7 +1026,7 @@ function drawMonkey(m) {
   // rotes Herz ueber dem Kopf zeigt, wer "es" ist
   if (m.it) {
     const hx = m.x + HB_W / 2 - 3.5;
-    const hy = m.y - 10 + Math.sin(m.anim * 5) * 1.4;
+    const hy = m.y - 10 + stepBob(m.anim, 0.42) * 2;
     drawSprite(SPR.heart, hx, hy, 1);
   }
 
@@ -956,10 +1037,12 @@ function drawMonkey(m) {
   drawSprite(spr, sx, sy, m.face);
   ctx.globalAlpha = 1;
 
+  // Das getragene Symbol wippt mit dem Affen mit, sonst zappelt es
+  // unabhaengig von ihm. Im Stehen ein ruhiges, langsames Schweben.
   if (m.itemReady) {
     const isp = SPR[itemKindOf(m)];
     const ix = m.face > 0 ? m.x + HB_W - 1 : m.x - ITEM_W + 1;
-    const iy = m.y + 5 + Math.sin(m.anim * 5) * 0.7;
+    const iy = m.y + 5 + (laeuft ? bob : stepBob(m.anim, 0.7));
     drawSprite(isp, ix, iy, m.face);
   }
 
