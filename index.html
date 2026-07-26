@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1b12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Affenjagd</title>
+<link rel="icon" href="icon.png">
+<link rel="apple-touch-icon" href="icon.png">
+<!-- Vorschau in WhatsApp. og:image braucht eine vollstaendige Adresse,
+     sobald die GitHub-Pages-URL bekannt ist. -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Affenjagd - Fangis auf dem Baum">
+<meta property="og:description" content="Zwei Pixel-Affen jagen sich einen Baum hoch und runter. Eine Runde dauert 60 Sekunden.">
+<meta property="og:image" content="icon.png">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden;
+    background:#0d1b12;
+    touch-action:none; overscroll-behavior:none;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  body { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  canvas {
+    display:block;
+    image-rendering:pixelated;
+    image-rendering:-moz-crisp-edges;
+    image-rendering:crisp-edges;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function () {
+"use strict";
+
+/* ============================================================
+   AFFENJAGD — Fangis auf einem Baum
+
+   Zwei Affen, einer ist "es" und muss fangen. Berührung tauscht
+   die Rollen. Punkte gibt es nur, solange man nicht "es" ist.
+
+   Bewegung: Äste sind von unten durchlässig, Lianen führen nach
+   oben, "runter" auf einem Ast lässt einen durchfallen.
+   ============================================================ */
+
+// ---------- Maße ----------
+const TILE = 10;
+const COLS = 18;
+const W = COLS * TILE;          // 180 logische Pixel breit
+const HUD_ROWS = 4;
+const LEVEL_GAP = 5;            // Reihen zwischen zwei Ästen
+let ROWS, H;
+
+// ---------- Spielwerte ----------
+const ROUND_TIME    = 60;
+const RUN_SPEED     = 66;
+const CLIMB_SPEED   = 48;
+const GRAVITY        = 430;
+const JUMP_VEL      = -145;
+const MAX_FALL      = 290;
+const DROP_TIME     = 0.28;     // so lange ist der Ast durchlässig
+const TAG_IMMUNE    = 1.3;
+const SLIP_TIME     = 1.1;      // Banane
+const SNIFF_TIME    = 1.4;      // Blume
+const ITEM_COOLDOWN = 6.0;
+const ITEM_LIFE     = 9.0;
+const AI_SPEED_MUL  = 0.97;
+const PTS_PER_SEC   = 10;
+const TAG_BONUS     = 25;
+
+// ---------- Farben ----------
+const SKY_TOP    = "#13324a";
+const SKY_BOTTOM = "#2b6b3f";
+const BARK       = "#7a4b23";
+const BARK_TOP   = "#a8712f";
+const BARK_DARK  = "#54331a";
+const LEAF_A     = "#3f9d4a";
+const LEAF_B     = "#2d7738";
+const VINE_A     = "#4bb257";
+const VINE_B     = "#2f7d3a";
+const EARTH      = "#5a3b1e";
+const GRASS      = "#46a352";
+
+// ---------- Zufall mit festem Startwert: Karte ist immer gleich ----------
+let seed = 20260726;
+function rnd() {
+  seed = (seed * 1664525 + 1013904223) >>> 0;
+  return seed / 4294967296;
+}
+
+/* ============================================================
+   Karte
+   grid:  "." leer   "=" Ast (von unten durchlässig)   "#" Boden
+   vines: true, wenn dort eine Liane hängt
+   ============================================================ */
+let grid = null, vines = null, platformRows = [];
+
+function inside(c, r) { return c >= 0 && c < COLS && r >= 0 && r < ROWS; }
+function isGround(c, r) {
+  if (c < 0 || c >= COLS) return true;    // Seitenwände
+  if (r < 0) return false;
+  if (r >= ROWS) return true;
+  return grid[r][c] === "#";
+}
+function isPlatform(c, r) { return inside(c, r) && grid[r][c] === "="; }
+function isVine(c, r) { return inside(c, r) && vines[r][c]; }
+
+function buildMap() {
+  seed = 20260726;
+  grid = []; vines = [];
+  for (let r = 0; r < ROWS; r++) {
+    grid.push(new Array(COLS).fill("."));
+    vines.push(new Array(COLS).fill(false));
+  }
+
+  // Boden
+  for (let c = 0; c < COLS; c++) { grid[ROWS - 1][c] = "#"; grid[ROWS - 2][c] = "#"; }
+
+  // Äste von unten nach oben
+  platformRows = [];
+  for (let r = ROWS - 2 - LEVEL_GAP; r >= HUD_ROWS + 2; r -= LEVEL_GAP) platformRows.push(r);
+  for (const rp of platformRows) for (let c = 0; c < COLS; c++) grid[rp][c] = "=";
+
+  // Lianen: von jedem Ast bis zur Ebene darunter.
+  // Sie reichen eine Reihe über den Ast hinaus, damit man sie
+  // im Stehen greifen kann.
+  for (let i = 0; i < platformRows.length; i++) {
+    const rp = platformRows[i];
+    const rBelow = (i === 0) ? ROWS - 2 : platformRows[i - 1];
+
+    const cols = [];
+    let guard = 0;
+    while (cols.length < 2 && guard++ < 500) {
+      const c = 2 + Math.floor(rnd() * (COLS - 4));
+      if (cols.every(x => Math.abs(x - c) >= 5)) cols.push(c);
+    }
+    for (const c of cols) {
+      for (let r = rp - 1; r <= rBelow - 1; r++) vines[r][c] = true;
+    }
+  }
+}
+
+/* ============================================================
+   Navigationsgraph für den Gegner
+   ============================================================ */
+let adj = [], radj = [], distField = null;
+function idx(c, r) { return r * COLS + c; }
+
+function navFree(c, r) { return inside(c, r) && !isGround(c, r); }
+function navSupported(c, r) {
+  if (!inside(c, r)) return false;
+  return isGround(c, r + 1) || isPlatform(c, r + 1) || isVine(c, r);
+}
+
+function buildNav() {
+  const n = COLS * ROWS;
+  adj = new Array(n); radj = new Array(n);
+  for (let i = 0; i < n; i++) { adj[i] = []; radj[i] = []; }
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!navFree(c, r)) continue;
+      const from = idx(c, r);
+
+      if (navSupported(c, r)) {
+        for (const dc of [-1, 1]) {
+          if (navFree(c + dc, r)) adj[from].push(idx(c + dc, r));
+        }
+        if (isVine(c, r) && isVine(c, r - 1)) adj[from].push(idx(c, r - 1));
+      }
+      // nach unten: klettern, durchfallen oder springen lassen
+      if (navFree(c, r + 1)) adj[from].push(idx(c, r + 1));
+    }
+  }
+  for (let i = 0; i < n; i++) for (const j of adj[i]) radj[j].push(i);
+  distField = new Int32Array(n);
+}
+
+// distField[x] = Schritte von Kachel x bis zum Ziel
+const bfsQueue = [];
+function computeField(tc, tr) {
+  distField.fill(-1);
+  if (!inside(tc, tr)) return;
+  let start = idx(tc, tr);
+  if (!navFree(tc, tr)) {
+    let found = -1;
+    for (let d = 1; d <= 4 && found < 0; d++) {
+      if (navFree(tc, tr - d)) found = idx(tc, tr - d);
+      else if (navFree(tc, tr + d)) found = idx(tc, tr + d);
+    }
+    if (found < 0) return;
+    start = found;
+  }
+  bfsQueue.length = 0;
+  bfsQueue.push(start);
+  distField[start] = 0;
+  let head = 0;
+  while (head < bfsQueue.length) {
+    const cur = bfsQueue[head++];
+    const d = distField[cur] + 1;
+    const nb = radj[cur];
+    for (let k = 0; k < nb.length; k++) {
+      if (distField[nb[k]] === -1) { distField[nb[k]] = d; bfsQueue.push(nb[k]); }
+    }
+  }
+}
+
+/* ============================================================
+   Sprites
+   ============================================================ */
+const MONKEY = [
+  "................",
+  "....oooooooo....",
+  "..ooFFFFFFFFoo..",
+  ".oFFFFFFFFFFFFo.",
+  "ooFFssssssssFFoo",
+  "oFFFssssssssFFFo",
+  "oFFswEwsswEwsFFo",
+  "ooFFssssssssFFoo",
+  ".oFFssmmmmssFFo.",
+  "..ooFFssssFFoo..",
+  "...oFFFFFFFFo...",
+  "..oFFffffffFFo..",
+  ".oFFffffffffFFo.",
+  ".oFFffffffffFFo.",
+  "..oFFo....oFFo..",
+  "..oooo....oooo.."
+];
+const BANANA = [
+  "...oo..",
+  "..oyyo.",
+  ".oyyo..",
+  "oyyo...",
+  "oyo....",
+  "oyyo...",
+  ".ooo..."
+];
+const FLOWER = [
+  "..o.o..",
+  ".oWoWo.",
+  "o.WYW.o",
+  ".oWWWo.",
+  "..oWo..",
+  "...g...",
+  "...g..."
+];
+
+const PAL_PLAYER = { o:"#2b1a0e", F:"#8b5a2b", f:"#c08a4e", s:"#e8bd8a", w:"#ffffff", E:"#241109", m:"#8c4b3a" };
+const PAL_RIVAL  = { o:"#241a26", F:"#6e6473", f:"#a49aab", s:"#ddc9bd", w:"#ffffff", E:"#241109", m:"#7d4a55" };
+const PAL_ITEM   = { o:"#2b1a0e", y:"#f5d13b", W:"#fdfdf5", Y:"#f5d13b", g:"#2f7d3a" };
+
+function makeSprite(art, pal) {
+  const h = art.length, w = art[0].length;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const col = pal[art[y][x]];
+      if (!col) continue;
+      g.fillStyle = col;
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  return cv;
+}
+
+const SPR = {};
+function buildSprites() {
+  SPR.player = makeSprite(MONKEY, PAL_PLAYER);
+  SPR.rival  = makeSprite(MONKEY, PAL_RIVAL);
+  SPR.banana = makeSprite(BANANA, PAL_ITEM);
+  SPR.flower = makeSprite(FLOWER, PAL_ITEM);
+}
+
+/* ============================================================
+   Affen
+   ============================================================ */
+const HB_W = 9, HB_H = 14;
+const SPR_OFF_X = -3.5, SPR_OFF_Y = -2;
+
+function makeMonkey(isPlayer) {
+  return {
+    isPlayer,
+    x: 0, y: 0, vx: 0, vy: 0,
+    face: 1,
+    onGround: false,
+    onVine: false,
+    dropTimer: 0,
+    it: false,
+    slip: 0, sniff: 0, immune: 0,
+    itemReady: true, itemTimer: 0,
+    anim: 0, hurtFlash: 0
+  };
+}
+
+let player, rival, drops = [], particles = [];
+
+function centerTile(m) {
+  return { c: Math.floor((m.x + HB_W / 2) / TILE), r: Math.floor((m.y + HB_H / 2) / TILE) };
+}
+
+function moveX(m, dx) {
+  if (dx === 0) return;
+  m.x += dx;
+  const c0 = Math.floor(m.x / TILE), c1 = Math.floor((m.x + HB_W - 1) / TILE);
+  const r0 = Math.floor(m.y / TILE), r1 = Math.floor((m.y + HB_H - 1) / TILE);
+  for (let r = r0; r <= r1; r++) {
+    for (let c = c0; c <= c1; c++) {
+      if (!isGround(c, r)) continue;
+      m.x = (dx > 0) ? c * TILE - HB_W : (c + 1) * TILE;
+      m.vx = 0;
+      return;
+    }
+  }
+}
+
+function moveY(m, dy) {
+  if (dy === 0) return;
+  const prevBottom = m.y + HB_H;
+  m.y += dy;
+  const c0 = Math.floor(m.x / TILE), c1 = Math.floor((m.x + HB_W - 1) / TILE);
+  const r0 = Math.floor(m.y / TILE), r1 = Math.floor((m.y + HB_H - 1) / TILE);
+  const canLand = (dy > 0) && m.dropTimer <= 0 && !m.onVine;
+  for (let r = r0; r <= r1; r++) {
+    for (let c = c0; c <= c1; c++) {
+      if (isGround(c, r)) {
+        if (dy > 0) { m.y = r * TILE - HB_H; m.onGround = true; }
+        else m.y = (r + 1) * TILE;
+        m.vy = 0;
+        return;
+      }
+      // Ast: hält nur, wenn man von oben kommt
+      if (canLand && isPlatform(c, r) && prevBottom <= r * TILE + 1.5) {
+        m.y = r * TILE - HB_H;
+        m.onGround = true;
+        m.vy = 0;
+        return;
+      }
+    }
+  }
+}
+
+function updateMonkey(m, dir, dt, speedMul) {
+  m.anim += dt;
+  if (m.immune > 0) m.immune -= dt;
+  if (m.hurtFlash > 0) m.hurtFlash -= dt;
+  if (m.dropTimer > 0) m.dropTimer -= dt;
+  if (!m.itemReady) {
+    m.itemTimer -= dt;
+    if (m.itemTimer <= 0) { m.itemReady = true; m.itemTimer = 0; }
+  }
+
+  let inX = dir.x, inY = dir.y;
+
+  // Blume: bleibt stehen und schnuppert
+  if (m.sniff > 0) { m.sniff -= dt; inX = 0; inY = 0; }
+  // Banane: rutscht ohne Steuerung weiter
+  if (m.slip > 0) { m.slip -= dt; inX = 0; inY = 0; m.onVine = false; }
+
+  const cen = centerTile(m);
+  const overVine = isVine(cen.c, cen.r) && m.slip <= 0 && m.sniff <= 0;
+
+  // Liane greifen und loslassen
+  if (!overVine) m.onVine = false;
+  else if (inY !== 0) m.onVine = true;
+  else if (m.onVine && inX !== 0) m.onVine = false;
+
+  if (m.onVine) {
+    m.vy = inY * CLIMB_SPEED * speedMul;
+    m.vx = 0;
+    m.onGround = false;
+    m.dropTimer = 0;
+    // an der Liane ausrichten, damit das Klettern sauber aussieht
+    const target = cen.c * TILE + (TILE - HB_W) / 2;
+    m.x += (target - m.x) * Math.min(1, 14 * dt);
+  } else {
+    if (m.slip > 0) {
+      m.vx *= (1 - 1.6 * dt);           // rutscht aus, wenig Reibung
+    } else if (m.sniff > 0) {
+      m.vx = 0;
+    } else {
+      m.vx = inX * RUN_SPEED * speedMul;
+      if (inY < 0 && m.onGround) {
+        m.vy = JUMP_VEL; m.onGround = false; blip(430, 0.05);
+      } else if (inY > 0 && m.onGround) {
+        // durch den Ast nach unten fallen lassen
+        m.dropTimer = DROP_TIME;
+        m.onGround = false;
+        m.vy = 40;
+      }
+    }
+    m.vy = Math.min(m.vy + GRAVITY * dt, MAX_FALL);
+  }
+
+  if (inX !== 0 && m.slip <= 0 && m.sniff <= 0) m.face = inX > 0 ? 1 : -1;
+
+  m.onGround = false;
+  moveX(m, m.vx * dt);
+  moveY(m, m.vy * dt);
+
+  if (m.x < 0) { m.x = 0; m.vx = 0; }
+  if (m.x > W - HB_W) { m.x = W - HB_W; m.vx = 0; }
+  if (m.y > H) { m.y = H - HB_H - TILE * 2; m.vy = 0; }
+}
+
+/* ============================================================
+   Banane und Blume
+   ============================================================ */
+function dropItem(m) {
+  if (!m.itemReady || m.sniff > 0 || m.slip > 0) return;
+  m.itemReady = false;
+  m.itemTimer = ITEM_COOLDOWN;
+  drops.push({
+    kind: m.isPlayer ? "banana" : "flower",
+    owner: m,
+    x: Math.max(0, Math.min(W - 7, m.x + HB_W / 2 - 3.5 - m.face * 6)),
+    y: m.y + HB_H - 7,
+    vy: 0, life: ITEM_LIFE, born: 0
+  });
+  blip(300, 0.05);
+}
+
+function itemHits(d, m) {
+  return d.x + 6 > m.x && d.x + 1 < m.x + HB_W &&
+         d.y + 7 > m.y && d.y + 1 < m.y + HB_H;
+}
+
+function updateDrops(dt) {
+  for (let i = drops.length - 1; i >= 0; i--) {
+    const d = drops[i];
+    d.life -= dt; d.born += dt;
+
+    // fällt, bis ein Ast oder der Boden trägt
+    const prevBottom = d.y + 7;
+    d.vy = Math.min(d.vy + GRAVITY * dt, MAX_FALL);
+    d.y += d.vy * dt;
+    const c = Math.floor((d.x + 3.5) / TILE);
+    const r = Math.floor((d.y + 6) / TILE);
+    if (isGround(c, r) || (isPlatform(c, r) && prevBottom <= r * TILE + 2)) {
+      d.y = r * TILE - 7; d.vy = 0;
+    }
+    if (d.y > H) { drops.splice(i, 1); continue; }
+
+    const victim = (d.owner === player) ? rival : player;
+    if (d.born > 0.3 && itemHits(d, victim)) {
+      if (d.kind === "banana") {
+        victim.slip = SLIP_TIME;
+        victim.onVine = false;
+        const s = (Math.abs(victim.vx) > 4) ? Math.sign(victim.vx) : victim.face;
+        victim.vx = s * RUN_SPEED * 1.3;
+        burst(d.x + 3, d.y + 3, "#f5d13b", 9);
+        toast(victim.isPlayer ? "Ausgerutscht!" : "Er rutscht aus!", "#f5d13b");
+        blip(170, 0.14);
+      } else {
+        victim.sniff = SNIFF_TIME;
+        victim.vx = 0;
+        victim.onVine = false;
+        burst(d.x + 3, d.y + 3, "#fdfdf5", 9);
+        toast(victim.isPlayer ? "Duftet zu gut..." : "Er schnuppert!", "#fdfdf5");
+        blip(660, 0.14);
+      }
+      drops.splice(i, 1);
+      continue;
+    }
+    if (d.life <= 0) drops.splice(i, 1);
+  }
+}
+
+/* ============================================================
+   Effekte
+   ============================================================ */
+function burst(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 75,
+      vy: -Math.random() * 70 - 12,
+      life: 0.5 + Math.random() * 0.3,
+      col
+    });
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    p.vy += GRAVITY * 0.5 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+let toastText = "", toastTime = 0, toastCol = "#fff";
+function toast(txt, col) { toastText = txt; toastTime = 1.5; toastCol = col || "#fff"; }
+
+/* ============================================================
+   Ton
+   ============================================================ */
+let audioCtx = null;
+function initAudio() {
+  if (audioCtx) return;
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
+}
+function blip(freq, dur) {
+  if (!audioCtx || audioCtx.state !== "running") return;
+  try {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = "square"; o.frequency.value = freq;
+    g.gain.value = 0.05;
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + dur);
+  } catch (e) { /* Ton ist Beigabe */ }
+}
+
+/* ============================================================
+   Gegner
+   ============================================================ */
+let navTimer = 0, aiDir = { x: 0, y: 0 }, aiPause = 0;
+
+function updateAI(dt) {
+  navTimer -= dt;
+  aiPause -= dt;
+
+  if (navTimer <= 0) {
+    navTimer = 0.12;
+    const pt = centerTile(player);
+    computeField(pt.c, pt.r);
+
+    const rt = centerTile(rival);
+    const options = inside(rt.c, rt.r) ? adj[idx(rt.c, rt.r)] : [];
+
+    let bestScore = rival.it ? Infinity : -Infinity, best = -1;
+    for (const nb of options) {
+      const d = distField[nb];
+      if (d === -1) continue;
+      if (rival.it ? (d < bestScore) : (d > bestScore)) { bestScore = d; best = nb; }
+    }
+
+    if (best >= 0) {
+      const bc = best % COLS, br = (best - bc) / COLS;
+      aiDir.x = Math.sign(bc - rt.c);
+      aiDir.y = Math.sign(br - rt.r);
+    } else {
+      aiDir.x = Math.sign(player.x - rival.x);
+      aiDir.y = rival.it ? Math.sign(player.y - rival.y) : 0;
+    }
+
+    // kurzes Zögern, damit er schlagbar bleibt
+    if (aiPause <= 0 && Math.random() < 0.05) aiPause = 0.22;
+
+    const dist = Math.hypot(player.x - rival.x, player.y - rival.y);
+    if (rival.itemReady && dist < (rival.it ? 58 : 44) && Math.random() < 0.3) dropItem(rival);
+  }
+
+  updateMonkey(rival, (aiPause > 0) ? { x: 0, y: 0 } : aiDir, dt, AI_SPEED_MUL);
+}
+
+/* ============================================================
+   Eingabe
+   ============================================================ */
+const keys = {};
+let stickId = null, stickOX = 0, stickOY = 0, stickX = 0, stickY = 0, stickActive = false;
+const DEAD = 5;
+const itemBtn = { x: 0, y: 0, r: 20 };
+
+function inputDir() {
+  let x = 0, y = 0;
+  if (stickActive) {
+    const dx = stickX - stickOX, dy = stickY - stickOY;
+    if (dx > DEAD) x = 1; else if (dx < -DEAD) x = -1;
+    if (dy > DEAD) y = 1; else if (dy < -DEAD) y = -1;
+  }
+  if (keys.ArrowLeft  || keys.a) x = -1;
+  if (keys.ArrowRight || keys.d) x = 1;
+  if (keys.ArrowUp    || keys.w) y = -1;
+  if (keys.ArrowDown  || keys.s) y = 1;
+  return { x, y };
+}
+
+/* ============================================================
+   Ablauf
+   ============================================================ */
+const STATE = { TITLE: 0, COUNT: 1, PLAY: 2, OVER: 3 };
+let state = STATE.TITLE;
+let score = 0, timeLeft = ROUND_TIME, countdown = 3, best = 0;
+try { best = parseInt(localStorage.getItem("affenjagd_best") || "0", 10) || 0; } catch (e) { best = 0; }
+
+function resetRound() {
+  drops = []; particles = [];
+  score = 0; timeLeft = ROUND_TIME; countdown = 3;
+  toastText = ""; toastTime = 0;
+
+  player = makeMonkey(true);
+  rival  = makeMonkey(false);
+
+  player.x = W / 2 - HB_W / 2;
+  player.y = (ROWS - 2) * TILE - HB_H;
+
+  const topRow = platformRows[platformRows.length - 1];
+  rival.x = 2 * TILE;
+  rival.y = topRow * TILE - HB_H;
+
+  rival.it = true;              // der graue Affe jagt zuerst
+  player.it = false;
+  rival.immune = 0.6;
+  navTimer = 0; aiDir.x = 0; aiDir.y = 0; aiPause = 0;
+}
+
+function swapRoles(tagger) {
+  const other = (tagger === player) ? rival : player;
+  tagger.it = false;
+  other.it = true;
+  tagger.immune = TAG_IMMUNE;
+  other.immune = TAG_IMMUNE;
+  other.hurtFlash = 0.4;
+
+  const dir = Math.sign(other.x - tagger.x) || 1;
+  other.vx = dir * RUN_SPEED * 1.1;
+
+  if (tagger === player) {
+    score += TAG_BONUS;
+    toast("Gefangen! +" + TAG_BONUS, "#ffe066");
+    blip(880, 0.13);
+  } else {
+    toast("Du bist es! Lauf!", "#ff6b5a");
+    blip(150, 0.2);
+  }
+  burst(other.x + HB_W / 2, other.y + HB_H / 2, "#ffe066", 12);
+}
+
+function checkTag() {
+  if (player.immune > 0 || rival.immune > 0) return;
+  const hit = player.x + HB_W > rival.x && player.x < rival.x + HB_W &&
+              player.y + HB_H > rival.y && player.y < rival.y + HB_H;
+  if (!hit) return;
+  if (player.it) swapRoles(player);
+  else if (rival.it) swapRoles(rival);
+}
+
+/* ============================================================
+   Zeichnen
+   ============================================================ */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d", { alpha: false });
+let scale = 1, bgCache = null;
+
+function layout() {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+
+  // Höhe an das Gerät anpassen, damit der Baum den Bildschirm füllt
+  let rows = Math.round((W * vh / vw) / TILE);
+  rows = Math.max(28, Math.min(46, rows));
+  const rebuild = (rows !== ROWS) || !grid;
+  ROWS = rows;
+  H = ROWS * TILE;
+
+  scale = Math.min(vw / W, vh / H);
+  canvas.style.width  = Math.floor(W * scale) + "px";
+  canvas.style.height = Math.floor(H * scale) + "px";
+  canvas.width  = Math.floor(W * scale * dpr);
+  canvas.height = Math.floor(H * scale * dpr);
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+
+  itemBtn.x = W - 28; itemBtn.y = H - 26;
+
+  if (rebuild) {
+    buildMap();
+    buildNav();
+    bgCache = null;
+    resetRound();
+    if (state === STATE.PLAY || state === STATE.COUNT) state = STATE.TITLE;
+  }
+}
+
+function drawBackground() {
+  if (bgCache && bgCache.width === W && bgCache.height === H) {
+    ctx.drawImage(bgCache, 0, 0);
+    return;
+  }
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const g = cv.getContext("2d");
+
+  const grad = g.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, SKY_TOP);
+  grad.addColorStop(1, SKY_BOTTOM);
+  g.fillStyle = grad; g.fillRect(0, 0, W, H);
+
+  // Blätterwerk im Hintergrund
+  let s2 = 4242;
+  const r2 = () => { s2 = (s2 * 1103515245 + 12345) >>> 0; return s2 / 4294967296; };
+  g.globalAlpha = 0.16;
+  for (let i = 0; i < 110; i++) {
+    const x = Math.floor(r2() * W), y = Math.floor(r2() * H);
+    g.fillStyle = r2() > 0.5 ? LEAF_A : LEAF_B;
+    g.fillRect(x, y, 6 + Math.floor(r2() * 14), 4 + Math.floor(r2() * 8));
+  }
+  g.globalAlpha = 1;
+
+  // Stamm als Deko
+  g.fillStyle = "rgba(58,36,17,0.4)";
+  g.fillRect(Math.floor(W / 2) - 13, 0, 26, H);
+
+  // Lianen zuerst, damit sie hinter den Ästen liegen
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!vines[r][c]) continue;
+      const x = c * TILE, y = r * TILE;
+      g.fillStyle = VINE_B; g.fillRect(x + 3, y, 4, TILE);
+      g.fillStyle = VINE_A; g.fillRect(x + 4, y, 2, TILE);
+      if ((r + c) % 3 === 0) { g.fillStyle = LEAF_A; g.fillRect(x + 7, y + 3, 3, 2); }
+      if ((r + c) % 4 === 1) { g.fillStyle = LEAF_B; g.fillRect(x, y + 6, 3, 2); }
+    }
+  }
+
+  // Äste und Boden
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const t = grid[r][c];
+      const x = c * TILE, y = r * TILE;
+      if (t === "=") {
+        g.fillStyle = BARK;      g.fillRect(x, y, TILE, 7);
+        g.fillStyle = BARK_TOP;  g.fillRect(x, y, TILE, 2);
+        g.fillStyle = BARK_DARK; g.fillRect(x, y + 5, TILE, 2);
+        g.fillStyle = "rgba(0,0,0,0.12)";
+        g.fillRect(x + ((c * 5) % 7), y + 3, 1, 2);
+        if (c % 4 === 1) { g.fillStyle = LEAF_A; g.fillRect(x + 2, y - 2, 6, 2); }
+        if (c % 7 === 3) { g.fillStyle = LEAF_B; g.fillRect(x + 1, y + 7, 4, 2); }
+      } else if (t === "#") {
+        g.fillStyle = EARTH; g.fillRect(x, y, TILE, TILE);
+        if (r === ROWS - 2) { g.fillStyle = GRASS; g.fillRect(x, y, TILE, 3); }
+        g.fillStyle = "rgba(0,0,0,0.16)";
+        g.fillRect(x + ((c * 7) % 6), y + 5, 2, 2);
+      }
+    }
+  }
+
+  bgCache = cv;
+  ctx.drawImage(bgCache, 0, 0);
+}
+
+function drawSprite(cv, x, y, flip) {
+  const px = Math.round(x), py = Math.round(y);
+  if (flip < 0) {
+    ctx.save();
+    ctx.translate(px + cv.width, py);
+    ctx.scale(-1, 1);
+    ctx.drawImage(cv, 0, 0);
+    ctx.restore();
+  } else {
+    ctx.drawImage(cv, px, py);
+  }
+}
+
+function drawMonkey(m) {
+  const spr = m.isPlayer ? SPR.player : SPR.rival;
+  let bob = 0;
+  if (m.onVine && Math.abs(m.vy) > 1) bob = Math.sin(m.anim * 16);
+  else if (m.onGround && Math.abs(m.vx) > 1) bob = Math.sin(m.anim * 18);
+
+  const sx = m.x + SPR_OFF_X;
+  const sy = m.y + SPR_OFF_Y + bob;
+
+  // Pfeil über dem Kopf zeigt, wer "es" ist
+  if (m.it) {
+    const ax = Math.round(m.x + HB_W / 2);
+    const ay = Math.round(m.y - 10 + Math.sin(m.anim * 7) * 1.5);
+    ctx.fillStyle = "#2b1a0e";
+    for (let i = 0; i < 5; i++) ctx.fillRect(ax - 4 + i, ay - 1 + i, 9 - 2 * i, 1);
+    ctx.fillStyle = "#ff4d3a";
+    for (let i = 0; i < 4; i++) ctx.fillRect(ax - 3 + i, ay + i, 7 - 2 * i, 1);
+  }
+
+  if (m.hurtFlash > 0 && Math.floor(m.hurtFlash * 20) % 2 === 0) ctx.globalAlpha = 0.45;
+  else if (m.immune > 0 && Math.floor(m.immune * 12) % 2 === 0) ctx.globalAlpha = 0.6;
+  drawSprite(spr, sx, sy, m.face);
+  ctx.globalAlpha = 1;
+
+  // getragenes Item
+  if (m.itemReady) {
+    const isp = m.isPlayer ? SPR.banana : SPR.flower;
+    const ix = m.face > 0 ? m.x + HB_W - 2 : m.x - 5;
+    const iy = m.y + 4 + Math.sin(m.anim * 5) * 0.7;
+    drawSprite(isp, ix, iy, m.face);
+  }
+
+  // Zustand über dem Kopf
+  if (m.sniff > 0) {
+    ctx.fillStyle = "#ff9ec4";
+    const t = Math.sin(m.anim * 8) * 2;
+    ctx.fillRect(Math.round(m.x + 2 + t), Math.round(m.y - 6), 2, 2);
+    ctx.fillRect(Math.round(m.x + 5 + t), Math.round(m.y - 10), 3, 3);
+  } else if (m.slip > 0) {
+    ctx.fillStyle = "#f5d13b";
+    ctx.fillRect(Math.round(m.x + 4), Math.round(m.y - 9), 2, 5);
+    ctx.fillRect(Math.round(m.x + 4), Math.round(m.y - 3), 2, 2);
+  }
+}
+
+function drawDrops() {
+  for (const d of drops) {
+    if (d.life < 2 && Math.floor(d.life * 8) % 2 === 0) continue;
+    drawSprite(d.kind === "banana" ? SPR.banana : SPR.flower, d.x, d.y, 1);
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.fillStyle = p.col;
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life * 2));
+    ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function text(str, x, y, col, align, size) {
+  ctx.fillStyle = col || "#fff";
+  ctx.font = (size || 8) + 'px "Courier New", Courier, monospace';
+  ctx.textAlign = align || "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(str, Math.round(x), Math.round(y));
+}
+
+function drawHUD() {
+  ctx.fillStyle = "rgba(6,14,10,0.72)";
+  ctx.fillRect(0, 0, W, HUD_ROWS * TILE - 6);
+
+  text("PUNKTE " + Math.floor(score), 4, 3, "#ffe066", "left", 8);
+  const t = Math.max(0, Math.ceil(timeLeft));
+  text(t + "s", W - 4, 3, t <= 10 ? "#ff6b5a" : "#cfe8d4", "right", 8);
+  text("BEST " + best, 4, 13, "#7fa88a", "left", 7);
+
+  if (player.it) text("DU BIST ES - FANG IHN!", W / 2, 22, "#ff6b5a", "center", 8);
+  else           text("LAUF WEG!", W / 2, 22, "#8ef2a0", "center", 8);
+
+  if (toastTime > 0) {
+    ctx.globalAlpha = Math.min(1, toastTime * 1.6);
+    text(toastText, W / 2, HUD_ROWS * TILE, toastCol, "center", 8);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawStick() {
+  if (!stickActive) return;
+  ctx.strokeStyle = "rgba(255,255,255,0.26)";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(stickOX, stickOY, 16, 0, Math.PI * 2); ctx.stroke();
+  const dx = Math.max(-16, Math.min(16, stickX - stickOX));
+  const dy = Math.max(-16, Math.min(16, stickY - stickOY));
+  ctx.fillStyle = "rgba(255,255,255,0.38)";
+  ctx.beginPath(); ctx.arc(stickOX + dx, stickOY + dy, 6, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawItemButton() {
+  const ready = player.itemReady;
+  ctx.beginPath();
+  ctx.arc(itemBtn.x, itemBtn.y, itemBtn.r, 0, Math.PI * 2);
+  ctx.fillStyle = ready ? "rgba(245,209,59,0.2)" : "rgba(255,255,255,0.07)";
+  ctx.fill();
+  ctx.strokeStyle = ready ? "rgba(245,209,59,0.8)" : "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  if (ready) {
+    drawSprite(SPR.banana, itemBtn.x - 3.5, itemBtn.y - 3.5, 1);
+  } else {
+    const frac = 1 - player.itemTimer / ITEM_COOLDOWN;
+    ctx.beginPath();
+    ctx.arc(itemBtn.x, itemBtn.y, itemBtn.r - 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+    ctx.strokeStyle = "rgba(245,209,59,0.55)";
+    ctx.stroke();
+  }
+}
+
+function drawPanel(lines) {
+  ctx.fillStyle = "rgba(6,14,10,0.87)";
+  ctx.fillRect(0, 0, W, H);
+  let y = H * 0.2;
+  for (const l of lines) {
+    text(l.t, W / 2, y, l.c, "center", l.s || 8);
+    y += (l.s || 8) + (l.gap || 5);
+  }
+}
+
+function drawTitle() {
+  drawBackground();
+  drawPanel([
+    { t: "AFFENJAGD",              c: "#ffe066", s: 16, gap: 9 },
+    { t: "Fangis auf dem Baum",    c: "#8ef2a0", s: 8,  gap: 14 },
+    { t: "Der graue Affe jagt dich.", c: "#e8e8e8", s: 8 },
+    { t: "Beruehrung tauscht die",  c: "#e8e8e8", s: 8 },
+    { t: "Rollen. Punkte gibt es",  c: "#e8e8e8", s: 8 },
+    { t: "nur in Freiheit.",        c: "#e8e8e8", s: 8, gap: 14 },
+    { t: "Daumen ziehen: laufen",   c: "#cfe8d4", s: 8 },
+    { t: "an der Liane: klettern",  c: "#cfe8d4", s: 8 },
+    { t: "runter auf dem Ast:",     c: "#cfe8d4", s: 8 },
+    { t: "durchfallen lassen",      c: "#cfe8d4", s: 8, gap: 14 },
+    { t: "Banane: er rutscht aus",  c: "#f5d13b", s: 8 },
+    { t: "Seine Blume: du bleibst", c: "#fdfdf5", s: 8 },
+    { t: "stehen und schnupperst",  c: "#fdfdf5", s: 8, gap: 16 },
+    { t: "TIPPEN ZUM STARTEN",      c: "#ffe066", s: 10 }
+  ]);
+}
+
+function drawOver() {
+  drawBackground();
+  drawPanel([
+    { t: "ZEIT UM!", c: "#ffe066", s: 16, gap: 14 },
+    { t: "PUNKTE",   c: "#cfe8d4", s: 8,  gap: 3 },
+    { t: String(Math.floor(score)), c: "#8ef2a0", s: 22, gap: 14 },
+    { t: Math.floor(score) >= best ? "NEUER REKORD!" : "BEST " + best,
+      c: Math.floor(score) >= best ? "#ffe066" : "#7fa88a", s: 9, gap: 20 },
+    { t: "TIPPEN FUER NEUE RUNDE", c: "#ffe066", s: 9 }
+  ]);
+}
+
+function drawCountdown() {
+  ctx.fillStyle = "rgba(6,14,10,0.4)";
+  ctx.fillRect(0, 0, W, H);
+  const n = Math.ceil(countdown);
+  text(n > 0 ? String(n) : "LOS!", W / 2, H / 2 - 14, "#ffe066", "center", 24);
+}
+
+function render() {
+  if (state === STATE.TITLE) { drawTitle(); return; }
+  if (state === STATE.OVER)  { drawOver();  return; }
+
+  drawBackground();
+  drawDrops();
+  drawMonkey(rival);
+  drawMonkey(player);
+  drawParticles();
+  drawHUD();
+  drawItemButton();
+  drawStick();
+  if (state === STATE.COUNT) drawCountdown();
+}
+
+/* ============================================================
+   Hauptschleife
+   ============================================================ */
+let last = 0;
+function frame(ts) {
+  if (!last) last = ts;
+  let dt = (ts - last) / 1000;
+  last = ts;
+  if (dt > 1 / 20) dt = 1 / 20;      // nach Pause nicht springen
+
+  if (state === STATE.COUNT) {
+    countdown -= dt;
+    updateMonkey(player, { x: 0, y: 0 }, dt, 1);
+    updateMonkey(rival,  { x: 0, y: 0 }, dt, 1);
+    if (countdown <= -0.6) state = STATE.PLAY;
+  } else if (state === STATE.PLAY) {
+    timeLeft -= dt;
+    if (!player.it) score += dt * PTS_PER_SEC;
+    updateMonkey(player, inputDir(), dt, 1);
+    updateAI(dt);
+    updateDrops(dt);
+    checkTag();
+    if (timeLeft <= 0) {
+      timeLeft = 0;
+      state = STATE.OVER;
+      const s = Math.floor(score);
+      if (s > best) {
+        best = s;
+        try { localStorage.setItem("affenjagd_best", String(best)); } catch (e) {}
+      }
+      blip(520, 0.3);
+    }
+  }
+
+  if (toastTime > 0) toastTime -= dt;
+  updateParticles(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* ============================================================
+   Ereignisse
+   ============================================================ */
+function toLogical(cx, cy) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (cx - r.left) / (r.width / W), y: (cy - r.top) / (r.height / H) };
+}
+
+function startOrRestart() {
+  initAudio();
+  if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  resetRound();
+  state = STATE.COUNT;
+}
+
+function onDown(id, cx, cy) {
+  if (state === STATE.TITLE || state === STATE.OVER) { startOrRestart(); return; }
+  const p = toLogical(cx, cy);
+  if (Math.hypot(p.x - itemBtn.x, p.y - itemBtn.y) <= itemBtn.r + 4) { dropItem(player); return; }
+  if (stickId === null) {
+    stickId = id; stickOX = p.x; stickOY = p.y; stickX = p.x; stickY = p.y;
+    stickActive = true;
+  } else {
+    dropItem(player);        // zweiter Finger irgendwo wirft das Item
+  }
+}
+function onMove(id, cx, cy) {
+  if (id !== stickId) return;
+  const p = toLogical(cx, cy);
+  stickX = p.x; stickY = p.y;
+}
+function onUp(id) {
+  if (id === stickId) { stickId = null; stickActive = false; }
+}
+
+canvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) onDown(t.identifier, t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener("touchmove", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) onMove(t.identifier, t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener("touchend", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) onUp(t.identifier);
+}, { passive: false });
+canvas.addEventListener("touchcancel", e => {
+  for (const t of e.changedTouches) onUp(t.identifier);
+}, { passive: false });
+
+canvas.addEventListener("mousedown", e => onDown("m", e.clientX, e.clientY));
+window.addEventListener("mousemove", e => onMove("m", e.clientX, e.clientY));
+window.addEventListener("mouseup", () => onUp("m"));
+
+window.addEventListener("keydown", e => {
+  keys[e.key] = true;
+  if (e.key === " " || e.key === "Shift") {
+    if (state === STATE.PLAY) dropItem(player);
+    e.preventDefault();
+  }
+  if (e.key === "Enter" && (state === STATE.TITLE || state === STATE.OVER)) startOrRestart();
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(e.key) >= 0) e.preventDefault();
+});
+window.addEventListener("keyup", e => { keys[e.key] = false; });
+
+window.addEventListener("resize", layout);
+window.addEventListener("orientationchange", () => setTimeout(layout, 250));
+document.addEventListener("visibilitychange", () => { last = 0; });
+
+// ---------- Start ----------
+buildSprites();
+layout();
+state = STATE.TITLE;
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
