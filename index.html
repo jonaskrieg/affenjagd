@@ -409,6 +409,7 @@ const ITEM_W = 9, ITEM_H = 9;
 function makeMonkey(isPlayer) {
   return {
     isPlayer,
+    item: null,
     x: 0, y: 0, vx: 0, vy: 0,
     face: 1,
     onGround: false, onVine: false,
@@ -535,11 +536,11 @@ function updateMonkey(m, dir, dt, speedMul) {
 /* ============================================================
    Blume und Banane
    ============================================================ */
-// Welches Symbol der Spieler auf der Startseite gewaehlt hat.
-// Der Gegner bekommt das andere.
+// Welches Symbol der Spieler auf der Startseite gewaehlt hat. Jeder
+// Affe traegt sein eigenes, damit im Mehrspieler beide frei waehlen.
 let playerItem = "flower";
 function otherItem(kind) { return kind === "flower" ? "banana" : "flower"; }
-function itemKindOf(m) { return m.isPlayer ? playerItem : otherItem(playerItem); }
+function itemKindOf(m) { return m.item || (m.isPlayer ? playerItem : otherItem(playerItem)); }
 
 function dropItem(m) {
   if (!m.itemReady || m.freeze > 0 || m.sniff > 0 || m.slip > 0) return;
@@ -771,6 +772,223 @@ function updateAI(dt) {
 }
 
 /* ============================================================
+   Mehrspieler ueber Supabase Realtime
+
+   Die ersten beiden Besucher der Seite spielen gegeneinander, wer
+   spaeter kommt schaut zu. Der zuerst Anwesende rechnet das Spiel und
+   schickt Zustaende; der andere schickt nur seine Eingabe und sagt
+   seine eigene Figur lokal voraus, damit die Steuerung trotz Laufzeit
+   direkt wirkt. Faellt jemand weg, endet die Runde mit einer Meldung.
+
+   Der Schluessel ist der oeffentliche "publishable"-Schluessel. Er
+   gehoert bei Supabase ausdruecklich in den Browser-Code.
+   ============================================================ */
+const SUPA_URL = "https://iiscxnttsskfctcepjcd.supabase.co";
+const SUPA_KEY = "sb_publishable_rzk7ONw4HThM91u4VvgyaA_-7aVxi0W";
+const ROOM     = "affenjagd-v1";
+
+const SEND_STATE_HZ = 15;
+const SEND_INPUT_HZ = 20;
+
+const net = {
+  on: false,                 // ist ein zweiter Mensch dabei?
+  status: "connecting",      // connecting | alone | ready | playing | full | lost | error
+  ch: null,
+  myId: Math.random().toString(36).slice(2, 10),
+  joined: Date.now(),
+  peers: [],                 // sortierte Teilnehmer, erster ist Gastgeber
+  role: "solo",              // solo | host | guest | spectator
+  peerItem: null,
+  peerName: "",
+  guestIn: { x: 0, y: 0 },   // beim Gastgeber: letzte Eingabe des Gastes
+  dropSeq: 0, seenDropSeq: 0,
+  snapA: null, snapB: null, snapTime: 0, snapGap: 1 / SEND_STATE_HZ,
+  lastState: 0, lastInput: 0
+};
+
+function packFlags(m) {
+  return (m.it ? 1 : 0) | (m.freeze > 0 ? 2 : 0) | (m.sniff > 0 ? 4 : 0) |
+         (m.slip > 0 ? 8 : 0) | (m.itemReady ? 16 : 0) | (m.onVine ? 32 : 0) |
+         (m.onGround ? 64 : 0) | (m.immune > 0 ? 128 : 0);
+}
+// Die Zeiten selbst bleiben beim Gastgeber. Hier genuegt "gilt gerade",
+// laufend aufgefrischt vom naechsten Zustandspaket.
+function applyFlags(m, f) {
+  m.it        = !!(f & 1);
+  m.freeze    = (f & 2)   ? 0.25 : 0;
+  m.sniff     = (f & 4)   ? 0.25 : 0;
+  m.slip      = (f & 8)   ? 0.25 : 0;
+  m.itemReady = !!(f & 16);
+  m.onVine    = !!(f & 32);
+  m.onGround  = !!(f & 64);
+  m.immune    = (f & 128) ? 0.25 : 0;
+}
+
+function snapOf(m, cnt) {
+  return [Math.round(m.x * 4) / 4, Math.round(m.y * 4) / 4, m.face, packFlags(m), cnt];
+}
+
+function sendState() {
+  if (!net.ch || net.role !== "host") return;
+  const d = [];
+  for (const it of drops) d.push([it.kind === "banana" ? 1 : 0, Math.round(it.x), Math.round(it.y)]);
+  net.ch.send({
+    type: "broadcast", event: "s",
+    payload: {
+      a: snapOf(player, player.itCount),
+      b: snapOf(rival, rival.itCount),
+      d: d,
+      sa: Math.floor(score), sb: Math.floor(netGuestScore),
+      st: state
+    }
+  });
+}
+
+function sendInput() {
+  if (!net.ch || net.role !== "guest") return;
+  const dir = inputDir();
+  net.ch.send({
+    type: "broadcast", event: "i",
+    payload: { x: dir.x, y: dir.y, q: net.dropSeq }
+  });
+}
+
+// Der Gast sagt seine eigene Figur voraus. Weicht sie zu weit von der
+// Wahrheit des Gastgebers ab, wird sie sanft nachgezogen; bei grossem
+// Fehler hart gesetzt.
+function reconcile(m, sx, sy) {
+  const dx = sx - m.x, dy = sy - m.y;
+  if (Math.abs(dx) > 14 || Math.abs(dy) > 14) { m.x = sx; m.y = sy; m.vx = 0; m.vy = 0; }
+  else { m.x += dx * 0.18; m.y += dy * 0.18; }
+}
+
+function applySnapshot(p) {
+  net.snapB = net.snapA;
+  net.snapA = p;
+  net.snapTime = clock;
+
+  const mine  = (net.role === "host") ? p.a : p.b;
+  const yours = (net.role === "host") ? p.b : p.a;
+
+  applyFlags(player, mine[3]);
+  player.face = mine[2];
+  player.itCount = mine[4];
+  reconcile(player, mine[0], mine[1]);
+
+  applyFlags(rival, yours[3]);
+  rival.face = yours[2];
+  rival.itCount = yours[4];
+
+  score = (net.role === "host") ? p.sa : p.sb;
+
+  drops = p.d.map(e => ({
+    kind: e[0] ? "banana" : "flower",
+    owner: null, x: e[1], y: e[2], vy: 0, life: 9, born: 9
+  }));
+
+  if (p.st === STATE.OVER && state === STATE.PLAY) endRound(true);
+  else if (p.st === STATE.PLAY && state !== STATE.PLAY) state = STATE.PLAY;
+}
+
+// Zwischen zwei Paketen wird die gegnerische Figur weich geschoben.
+function interpolateRival() {
+  if (!net.snapA) return;
+  const yours = (net.role === "host") ? net.snapA.b : net.snapA.a;
+  const alt   = net.snapB ? ((net.role === "host") ? net.snapB.b : net.snapB.a) : yours;
+  const a = Math.max(0, Math.min(1, (clock - net.snapTime) / net.snapGap));
+  rival.x = alt[0] + (yours[0] - alt[0]) * a;
+  rival.y = alt[1] + (yours[1] - alt[1]) * a;
+}
+
+// Supabase haengt bei wiederholtem track() einen weiteren Eintrag an,
+// statt den alten zu ersetzen. Deshalb nach Kennung zusammenfassen,
+// wobei der zuletzt gemeldete Eintrag gilt.
+function peersSorted(stateObj) {
+  const nachId = new Map();
+  for (const key in stateObj) {
+    for (const meta of stateObj[key]) {
+      if (meta && meta.id) nachId.set(meta.id, meta);
+    }
+  }
+  const list = [...nachId.values()];
+  list.sort((x, y) => (x.joined - y.joined) || (x.id < y.id ? -1 : 1));
+  return list;
+}
+
+function onPresence() {
+  if (!net.ch) return;
+  net.peers = peersSorted(net.ch.presenceState());
+  const idx = net.peers.findIndex(p => p.id === net.myId);
+  const gegner = (idx === 0) ? net.peers[1] : (idx === 1 ? net.peers[0] : null);
+
+  if (idx > 1) {
+    net.role = "spectator"; net.on = false; net.status = "full";
+  } else if (gegner) {
+    net.role = (idx === 0) ? "host" : "guest";
+    net.on = true;
+    net.peerItem = gegner.item || null;
+    net.status = "ready";
+    // Beide duerfen nicht dasselbe Symbol tragen. Der spaeter
+    // Beigetretene weicht aus.
+    if (net.peerItem && roleChosen && playerItem === net.peerItem && net.role === "guest") {
+      playerItem = otherItem(net.peerItem);
+      trackMe();
+    }
+  } else {
+    net.role = "solo"; net.on = false; net.peerItem = null;
+    if (net.status !== "playing") net.status = "alone";
+  }
+
+  if (state === STATE.PLAY && !gegner && net.wasOnline) {
+    net.status = "lost";
+    endRound(true);
+  }
+  net.wasOnline = net.on;
+}
+
+// Erst melden, was gewaehlt wurde — vorher darf der andere kein
+// belegtes Symbol sehen.
+function trackMe() {
+  if (net.ch) net.ch.track({
+    id: net.myId, joined: net.joined,
+    item: roleChosen ? playerItem : null
+  });
+}
+
+async function connect() {
+  try {
+    const mod = await import("https://esm.sh/@supabase/supabase-js@2");
+    const sb = mod.createClient(SUPA_URL, SUPA_KEY, {
+      realtime: { params: { eventsPerSecond: 40 } }
+    });
+    const ch = sb.channel(ROOM, { config: { presence: { key: net.myId } } });
+
+    ch.on("presence", { event: "sync" }, onPresence);
+    ch.on("broadcast", { event: "s" }, (m) => {
+      if (net.role === "guest") applySnapshot(m.payload);
+    });
+    ch.on("broadcast", { event: "i" }, (m) => {
+      if (net.role !== "host") return;
+      net.guestIn.x = m.payload.x;
+      net.guestIn.y = m.payload.y;
+      if (m.payload.q !== net.seenDropSeq) { net.seenDropSeq = m.payload.q; dropItem(rival); }
+    });
+    ch.on("broadcast", { event: "go" }, () => {
+      if (state !== STATE.PLAY) { resetRound(); state = STATE.PLAY; }
+    });
+
+    ch.subscribe((status) => {
+      if (status === "SUBSCRIBED") { net.ch = ch; trackMe(); }
+      else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") net.status = "error";
+    });
+  } catch (e) {
+    net.status = "error";
+  }
+}
+
+let netGuestScore = 0;
+
+/* ============================================================
    Eingabe
    ============================================================ */
 const keys = {};
@@ -807,6 +1025,8 @@ function resetRound() {
 
   player = makeMonkey(true);
   rival  = makeMonkey(false);
+  player.item = playerItem;
+  rival.item  = net.on && net.peerItem ? net.peerItem : otherItem(playerItem);
 
   player.x = W / 2 - HB_W / 2;
   player.y = (ROWS - 2) * TILE - HB_H;
@@ -852,8 +1072,9 @@ function swapRoles(tagger) {
   if (player.itCount >= IT_TARGET && rival.itCount >= IT_TARGET) endRound();
 }
 
-function endRound() {
+function endRound(vomNetz) {
   state = STATE.OVER;
+  if (net.role === "host" && !vomNetz) sendState();
   const s = Math.floor(score);
   if (s > best) {
     best = s;
@@ -1183,19 +1404,31 @@ function hits(box, p) {
   return p.x >= box.x && p.x <= box.x + box.w && p.y >= box.y && p.y <= box.y + box.h;
 }
 
-function drawChoice(box, kind, mine) {
+function drawChoice(box, kind, mine, peer) {
   const tint = (kind === "banana") ? "245,209,59" : "253,253,245";
-  ctx.fillStyle = mine ? "rgba(" + tint + ",0.16)" : "rgba(255,255,255,0.04)";
+  ctx.fillStyle = mine ? "rgba(" + tint + ",0.16)"
+                : peer ? "rgba(142,242,160,0.12)" : "rgba(255,255,255,0.04)";
   ctx.fillRect(box.x, box.y, box.w, box.h);
-  ctx.strokeStyle = mine ? "rgb(" + tint + ")" : "rgba(255,255,255,0.22)";
+  ctx.strokeStyle = mine ? "rgb(" + tint + ")"
+                  : peer ? "#8ef2a0" : "rgba(255,255,255,0.22)";
   ctx.lineWidth = 1;
   ctx.strokeRect(box.x + 0.5, box.y + 0.5, box.w - 1, box.h - 1);
-  if (mine) {
-    ctx.strokeRect(box.x + 2.5, box.y + 2.5, box.w - 5, box.h - 5);
-  }
+  if (mine || peer) ctx.strokeRect(box.x + 2.5, box.y + 2.5, box.w - 5, box.h - 5);
   drawSpriteScaled(SPR[kind],
     box.x + (box.w - ITEM_W * CHOICE_K) / 2,
     box.y + (box.h - ITEM_H * CHOICE_K) / 2, CHOICE_K);
+}
+
+function netHinweis() {
+  switch (net.status) {
+    case "connecting": return ["CONNECTING...", "#7fa88a"];
+    case "alone":      return ["NO ONE ELSE HERE - VS CPU", "#7fa88a"];
+    case "ready":      return ["PLAYER 2 IS HERE", "#8ef2a0"];
+    case "playing":    return ["PLAYER 2 IS HERE", "#8ef2a0"];
+    case "full":       return ["GAME FULL - TWO ARE PLAYING", "#ff6b5a"];
+    case "lost":       return ["PLAYER 2 LEFT", "#ff6b5a"];
+    default:           return ["OFFLINE - VS CPU", "#7fa88a"];
+  }
 }
 
 function drawTitle() {
@@ -1208,16 +1441,16 @@ function drawTitle() {
   text("MONKEY CHASE", W / 2, H * 0.13, "#ffe066", "center", 15);
   text("WHICH ONE ARE YOU?", W / 2, H * 0.21, "#cfe8d4", "center", 9);
 
-  drawChoice(uiFlower, "flower", roleChosen && playerItem === "flower");
-  drawChoice(uiBanana, "banana", roleChosen && playerItem === "banana");
+  const meins  = roleChosen ? playerItem : null;
+  const seins  = net.on ? net.peerItem : null;
+  drawChoice(uiFlower, "flower", meins === "flower", seins === "flower");
+  drawChoice(uiBanana, "banana", meins === "banana", seins === "banana");
 
   const labelY = uiFlower.y + uiFlower.h + 7;
-  if (roleChosen) {
-    const mine = (playerItem === "flower") ? uiFlower : uiBanana;
-    const theirs = (playerItem === "flower") ? uiBanana : uiFlower;
-    text("YOU", mine.x + mine.w / 2, labelY, "#ffe066", "center", 8);
-    text("CPU", theirs.x + theirs.w / 2, labelY, "#7fa88a", "center", 8);
-  }
+  const beschrifte = (box, txt, col) => text(txt, box.x + box.w / 2, labelY, col, "center", 8);
+  if (meins) beschrifte(meins === "flower" ? uiFlower : uiBanana, "YOU", "#ffe066");
+  if (seins) beschrifte(seins === "flower" ? uiFlower : uiBanana, "PLAYER 2", "#8ef2a0");
+  else if (meins && !net.on) beschrifte(meins === "flower" ? uiBanana : uiFlower, "CPU", "#7fa88a");
 
   // Startknopf, bis zur Wahl gedaempft
   ctx.fillStyle = roleChosen ? "rgba(255,224,102,0.18)" : "rgba(255,255,255,0.04)";
@@ -1227,6 +1460,9 @@ function drawTitle() {
   ctx.strokeRect(uiStart.x + 0.5, uiStart.y + 0.5, uiStart.w - 1, uiStart.h - 1);
   text("START", uiStart.x + uiStart.w / 2, uiStart.y + 8,
        roleChosen ? "#ffe066" : "#5d6b62", "center", 12);
+
+  const hin = netHinweis();
+  text(hin[0], W / 2, uiStart.y + uiStart.h + 12, hin[1], "center", 8);
 }
 
 function drawOver() {
@@ -1242,7 +1478,8 @@ function drawOver() {
   const heartY = top + 16 + Math.sin(clock * 2.2) * 3;
   const sy = top + 20 + SPR.heart.height * hk;
 
-  text("FRIENDS AGAIN", W / 2, top, "#ff8f7a", "center", 10);
+  text(net.status === "lost" ? "PLAYER 2 LEFT" : "FRIENDS AGAIN",
+       W / 2, top, "#ff8f7a", "center", 10);
   drawSpriteScaled(SPR.heart, W / 2 - (SPR.heart.width * hk) / 2, heartY, hk);
   drawSpriteScaled(SPR.hug, (W - SPR.hug.width * k) / 2, sy, k);
 
@@ -1254,7 +1491,7 @@ function drawOver() {
   const s = Math.floor(score);
   text(s >= best ? "NEW RECORD!" : "BEST " + best,
        W / 2, y, s >= best ? "#ffe066" : "#7fa88a", "center", 9); y += 20;
-  text("TAP FOR A NEW ROUND", W / 2, y, "#ffe066", "center", 9);
+  text("TAP TO PICK AGAIN", W / 2, y, "#ffe066", "center", 9);
 }
 
 function render() {
@@ -1284,11 +1521,28 @@ function frame(ts) {
   clock += dt;
 
   if (state === STATE.PLAY) {
-    if (!player.it) score += dt * PTS_PER_SEC;
-    updateMonkey(player, inputDir(), dt, 1);
-    updateAI(dt);
-    updateDrops(dt);
-    checkTag();
+    if (net.role === "host") {
+      // Rechnet fuer beide und verschickt den Zustand
+      if (!player.it) score += dt * PTS_PER_SEC;
+      if (!rival.it)  netGuestScore += dt * PTS_PER_SEC;
+      updateMonkey(player, inputDir(), dt, 1);
+      updateMonkey(rival, net.guestIn, dt, 1);
+      updateDrops(dt);
+      checkTag();
+      if (clock - net.lastState >= 1 / SEND_STATE_HZ) { net.lastState = clock; sendState(); }
+    } else if (net.role === "guest") {
+      // Eigene Figur lokal voraussagen, damit die Steuerung trotz
+      // Laufzeit sofort reagiert. Der Gegner wird weich nachgezogen.
+      updateMonkey(player, inputDir(), dt, 1);
+      interpolateRival();
+      if (clock - net.lastInput >= 1 / SEND_INPUT_HZ) { net.lastInput = clock; sendInput(); }
+    } else {
+      if (!player.it) score += dt * PTS_PER_SEC;
+      updateMonkey(player, inputDir(), dt, 1);
+      updateAI(dt);
+      updateDrops(dt);
+      checkTag();
+    }
   }
 
   if (toastTime > 0) toastTime -= dt;
@@ -1308,28 +1562,50 @@ function toLogical(cx, cy) {
 function startRound() {
   initAudio();
   if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  netGuestScore = 0;
+  net.snapA = null; net.snapB = null;
+  net.guestIn.x = 0; net.guestIn.y = 0;
   resetRound();
   state = STATE.PLAY;
+  if (net.on && net.ch) {
+    net.status = "playing";
+    net.ch.send({ type: "broadcast", event: "go", payload: {} });
+  }
+}
+
+// Der Gast wirft nicht selbst, sondern bittet den Gastgeber darum.
+function requestDrop() {
+  if (net.role === "guest") { net.dropSeq = (net.dropSeq + 1) % 1000; return; }
+  dropItem(player);
+}
+
+function waehle(kind) {
+  if (net.on && net.peerItem === kind) return;    // vom anderen belegt
+  playerItem = kind;
+  roleChosen = true;
+  trackMe();
+  blip(kind === "flower" ? 760 : 560, 0.06);
 }
 
 function onDown(id, cx, cy) {
   if (state === STATE.TITLE) {
     initAudio();
     if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    if (net.status === "full") return;             // Zuschauer
     const q = toLogical(cx, cy);
-    if (hits(uiFlower, q)) { playerItem = "flower"; roleChosen = true; blip(760, 0.06); return; }
-    if (hits(uiBanana, q)) { playerItem = "banana"; roleChosen = true; blip(560, 0.06); return; }
+    if (hits(uiFlower, q)) { waehle("flower"); return; }
+    if (hits(uiBanana, q)) { waehle("banana"); return; }
     if (roleChosen && hits(uiStart, q)) startRound();
     return;
   }
-  if (state === STATE.OVER) { startRound(); return; }
+  if (state === STATE.OVER) { state = STATE.TITLE; return; }
   const p = toLogical(cx, cy);
-  if (Math.hypot(p.x - itemBtn.x, p.y - itemBtn.y) <= itemBtn.r + 4) { dropItem(player); return; }
+  if (Math.hypot(p.x - itemBtn.x, p.y - itemBtn.y) <= itemBtn.r + 4) { requestDrop(); return; }
   if (stickId === null) {
     stickId = id; stickOX = p.x; stickOY = p.y; stickX = p.x; stickY = p.y;
     stickActive = true;
   } else {
-    dropItem(player);
+    requestDrop();
   }
 }
 function onMove(id, cx, cy) {
@@ -1364,16 +1640,15 @@ window.addEventListener("mouseup", () => onUp("m"));
 window.addEventListener("keydown", e => {
   keys[e.key] = true;
   if (e.key === " " || e.key === "Shift") {
-    if (state === STATE.PLAY) dropItem(player);
+    if (state === STATE.PLAY) requestDrop();
     e.preventDefault();
   }
   if (e.key === "Enter") {
-    if (state === STATE.OVER) startRound();
+    if (state === STATE.OVER) state = STATE.TITLE;
     else if (state === STATE.TITLE && roleChosen) startRound();
   }
   if (state === STATE.TITLE && (e.key === "1" || e.key === "2")) {
-    playerItem = (e.key === "1") ? "flower" : "banana";
-    roleChosen = true;
+    waehle(e.key === "1" ? "flower" : "banana");
   }
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(e.key) >= 0) e.preventDefault();
 });
@@ -1387,6 +1662,7 @@ document.addEventListener("visibilitychange", () => { last = 0; });
 buildSprites();
 layout();
 state = STATE.TITLE;
+connect();                 // Mehrspieler im Hintergrund, Einzelspiel laeuft ohne
 requestAnimationFrame(frame);
 
 })();

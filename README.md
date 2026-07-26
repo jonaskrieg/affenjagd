@@ -20,9 +20,32 @@ their momentum and runs off immediately.
 ## Picking a side
 
 The start screen shows nothing but a flower and a banana: *which one are you?*
-Tap one, tap START. The other monkey is played by the computer. Whichever you
-pick, you are always the lighter brown monkey, so you can find yourself in a
-scramble even when both items are recharging.
+Tap one, tap START. Whichever you pick, you are always the lighter brown
+monkey, so you can find yourself in a scramble even when both items are
+recharging.
+
+## Two players
+
+The first two people to open the page play against each other — there is no
+room code and nothing to join. A line under START says what is going on: alone
+means you play the computer, otherwise it tells you Player 2 is here. Once the
+other person picks a symbol, theirs is framed in green and the one they took
+can no longer be chosen. Anyone arriving third is told the game is full.
+
+This runs on Supabase Realtime. Presence tells each browser who else is on the
+page; the rest goes over broadcast messages. The publishable key sitting in
+`index.html` is meant to be public — that is how Supabase client apps work.
+No database tables and no security rules are involved.
+
+Whoever arrived first is the authority: that browser runs the simulation for
+both monkeys and sends the result about fifteen times a second. The other
+sends only its thumb input, twenty times a second, and predicts its own monkey
+locally so the controls feel immediate despite the round trip; its position is
+then eased back toward the authoritative one. Tags are decided in one place
+only, so the two screens never disagree about who caught whom.
+
+If someone closes the page mid-round, the other gets "Player 2 left" and the
+round ends. This is deliberately crude — it is a toy, not a service.
 
 ## Controls
 
