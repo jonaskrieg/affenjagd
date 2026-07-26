@@ -9,12 +9,15 @@
 <title>Affenjagd</title>
 <link rel="icon" href="icon.png">
 <link rel="apple-touch-icon" href="icon.png">
-<!-- Vorschau in WhatsApp. og:image braucht eine vollstaendige Adresse,
-     sobald die GitHub-Pages-URL bekannt ist. -->
+<!-- Vorschau in WhatsApp. og:image und og:url brauchen die vollstaendige
+     Adresse, relative Pfade wertet WhatsApp nicht aus. -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="Affenjagd - Fangis auf dem Baum">
 <meta property="og:description" content="Zwei Pixel-Affen jagen sich einen Baum hoch und runter. Eine Runde dauert 60 Sekunden.">
-<meta property="og:image" content="icon.png">
+<meta property="og:url" content="https://jonaskrieg.github.io/affenjagd/">
+<meta property="og:image" content="https://jonaskrieg.github.io/affenjagd/icon.png">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {

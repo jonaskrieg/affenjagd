@@ -57,10 +57,9 @@ folgt — bergab, wenn er jagt, bergauf, wenn er flieht.
 
 ## Veröffentlichen
 
-GitHub Pages auf `main` / Wurzelverzeichnis stellen. Danach in `index.html` bei
-`og:image` die vollständige Adresse eintragen, damit WhatsApp die Vorschau
-anzeigt:
+Läuft unter **https://jonaskrieg.github.io/affenjagd/**
 
-```html
-<meta property="og:image" content="https://BENUTZER.github.io/REPO/icon.png">
-```
+Eingestellt über *Settings → Pages* mit Quelle `main` / `/ (root)`. Die
+`og:`-Angaben in `index.html` zeigen auf diese Adresse — wird das Repo
+umbenannt oder verschoben, müssen sie mitwandern, sonst zeigt WhatsApp keine
+Vorschau mehr.
