@@ -69,9 +69,9 @@ const GRAVITY       = 430;
 const JUMP_VEL      = -145;
 const MAX_FALL      = 290;
 const DROP_TIME     = 0.28;
-const FREEZE_TIME   = 1.25;   // Vorsprung fuer den Geflohenen
-const START_FREEZE  = 0.9;
-const TAG_IMMUNE    = 1.5;
+const FREEZE_TIME   = 2.0;    // Vorsprung fuer den Geflohenen
+const START_FREEZE  = 1.2;
+const TAG_IMMUNE    = 2.2;    // etwas laenger als die Sperre
 const SLIP_TIME     = 1.1;    // Banane
 const SNIFF_TIME    = 1.4;    // Blume
 const ITEM_COOLDOWN = 6.0;
@@ -482,24 +482,26 @@ function updateMonkey(m, dir, dt, speedMul) {
   // schnuppert, darf an der Liane haengen bleiben.
   const overVine = isVine(cen.c, cen.r) && m.slip <= 0;
 
-  // Liane greifen und loslassen. "Runter" greift nur, wenn es
-  // darunter ueberhaupt weitergeht — sonst klebt man unten fest.
+  // "Runter" gegen festen Boden ist eine Sackgasse. "Hoch" ist nie
+  // eine: oben steigt man von selbst auf den Ast aus.
+  const deadEnd = (inY > 0 && onHardGround);
+
+  // Greifen und Loslassen. Wer an der Liane haengt, bleibt dort —
+  // eine leicht schraege Daumenhaltung darf einen nicht herunter-
+  // reissen. Loesen geht nur ueber eine reine Seitwaertsbewegung
+  // oder wenn die Kletterrichtung in eine Wand laeuft.
   if (!overVine) m.onVine = false;
-  else if (inY < 0) m.onVine = true;
-  else if (inY > 0 && !onHardGround) m.onVine = true;
+  else if (inY !== 0 && !deadEnd) m.onVine = true;
   else if (m.onVine && inX !== 0) m.onVine = false;
 
   if (m.onVine) {
     m.vy = inY * CLIMB_SPEED * speedMul;
-    // seitwaerts an der Liane bleibt erlaubt, sonst kann man
-    // sich nicht mehr davon loesen
-    m.vx = inX * CLIMB_SPEED * 0.85 * speedMul;
+    m.vx = 0;
     m.onGround = false;
     m.dropTimer = 0;
-    if (inX === 0) {
-      const target = cen.c * TILE + (TILE - HB_W) / 2;
-      m.x += (target - m.x) * Math.min(1, 14 * dt);
-    }
+    // immer zur Lianenmitte ziehen, damit man nicht abrutscht
+    const target = cen.c * TILE + (TILE - HB_W) / 2;
+    m.x += (target - m.x) * Math.min(1, 14 * dt);
   } else {
     if (m.slip > 0) {
       m.vx *= (1 - 1.6 * dt);
@@ -530,7 +532,11 @@ function updateMonkey(m, dir, dt, speedMul) {
 /* ============================================================
    Blume und Banane
    ============================================================ */
-function itemKindOf(m) { return m.isPlayer ? "flower" : "banana"; }
+// Welches Symbol der Spieler auf der Startseite gewaehlt hat.
+// Der Gegner bekommt das andere.
+let playerItem = "flower";
+function otherItem(kind) { return kind === "flower" ? "banana" : "flower"; }
+function itemKindOf(m) { return m.isPlayer ? playerItem : otherItem(playerItem); }
 
 function dropItem(m) {
   if (!m.itemReady || m.freeze > 0 || m.sniff > 0 || m.slip > 0) return;
@@ -738,12 +744,13 @@ function swapRoles(tagger) {
   tagger.it = false;
   other.it = true;
   other.itCount++;
+  // Nur der neue Faenger wird kurz blockiert. Der Geflohene behaelt
+  // seinen Schwung und laeuft ungebremst weiter; er ist lediglich
+  // solange nicht antastbar, damit ihn niemand sofort zurueckfangt.
   tagger.immune = TAG_IMMUNE;
   other.immune = TAG_IMMUNE;
-  // Der neue Faenger haelt kurz inne, damit der andere wegkommt
   other.freeze = FREEZE_TIME;
   other.hurtFlash = 0.4;
-  tagger.vx = 0;
 
   if (tagger === player) {
     score += TAG_BONUS;
@@ -803,6 +810,7 @@ function layout() {
   ctx.imageSmoothingEnabled = false;
 
   itemBtn.x = 28; itemBtn.y = H - 26;
+  layoutTitle();
 
   if (rebuild) {
     buildMap();
@@ -917,13 +925,15 @@ function drawMonkey(m) {
     drawSprite(SPR.heart, hx, hy, 1);
   }
 
+  // Nur der eben Gefangene flackert. Der Geflohene ist zwar auch
+  // kurz unantastbar, soll aber nicht aussehen wie bestraft.
   if (m.hurtFlash > 0 && Math.floor(m.hurtFlash * 20) % 2 === 0) ctx.globalAlpha = 0.45;
-  else if (m.immune > 0 && Math.floor(m.immune * 12) % 2 === 0) ctx.globalAlpha = 0.62;
+  else if (m.freeze > 0 && Math.floor(m.freeze * 12) % 2 === 0) ctx.globalAlpha = 0.62;
   drawSprite(spr, sx, sy, m.face);
   ctx.globalAlpha = 1;
 
   if (m.itemReady) {
-    const isp = m.isPlayer ? SPR.flower : SPR.banana;
+    const isp = SPR[itemKindOf(m)];
     const ix = m.face > 0 ? m.x + HB_W - 1 : m.x - ITEM_W + 1;
     const iy = m.y + 5 + Math.sin(m.anim * 5) * 0.7;
     drawSprite(isp, ix, iy, m.face);
@@ -1011,21 +1021,22 @@ function drawStick() {
 
 function drawItemButton() {
   const ready = player.itemReady;
+  const tint = (playerItem === "banana") ? "245,209,59" : "253,253,245";
   ctx.beginPath();
   ctx.arc(itemBtn.x, itemBtn.y, itemBtn.r, 0, Math.PI * 2);
-  ctx.fillStyle = ready ? "rgba(253,253,245,0.18)" : "rgba(255,255,255,0.07)";
+  ctx.fillStyle = ready ? "rgba(" + tint + ",0.18)" : "rgba(255,255,255,0.07)";
   ctx.fill();
-  ctx.strokeStyle = ready ? "rgba(253,253,245,0.8)" : "rgba(255,255,255,0.18)";
+  ctx.strokeStyle = ready ? "rgba(" + tint + ",0.8)" : "rgba(255,255,255,0.18)";
   ctx.lineWidth = 1;
   ctx.stroke();
 
   if (ready) {
-    drawSprite(SPR.flower, itemBtn.x - ITEM_W / 2, itemBtn.y - ITEM_H / 2, 1);
+    drawSprite(SPR[playerItem], itemBtn.x - ITEM_W / 2, itemBtn.y - ITEM_H / 2, 1);
   } else {
     const frac = 1 - player.itemTimer / ITEM_COOLDOWN;
     ctx.beginPath();
     ctx.arc(itemBtn.x, itemBtn.y, itemBtn.r - 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-    ctx.strokeStyle = "rgba(253,253,245,0.55)";
+    ctx.strokeStyle = "rgba(" + tint + ",0.55)";
     ctx.stroke();
   }
 }
@@ -1040,25 +1051,75 @@ function drawPanel(lines, startY) {
   }
 }
 
+/* ---------- Startseite: Rollenwahl ----------
+   Nur die beiden Symbole. Antippen waehlt, dann Start. */
+const CHOICE_K = 5;                     // Vergroesserung der Symbole
+const uiFlower = { x: 0, y: 0, w: 0, h: 0 };
+const uiBanana = { x: 0, y: 0, w: 0, h: 0 };
+const uiStart  = { x: 0, y: 0, w: 0, h: 0 };
+let roleChosen = false;
+
+function layoutTitle() {
+  const box = ITEM_W * CHOICE_K + 14;
+  const top = Math.round(H * 0.30);
+  uiFlower.w = uiFlower.h = uiBanana.w = uiBanana.h = box;
+  uiFlower.x = Math.round(W / 2 - box - 7);
+  uiBanana.x = Math.round(W / 2 + 7);
+  uiFlower.y = uiBanana.y = top;
+
+  uiStart.w = 98; uiStart.h = 26;
+  uiStart.x = Math.round(W / 2 - uiStart.w / 2);
+  uiStart.y = top + box + 40;
+}
+
+function hits(box, p) {
+  return p.x >= box.x && p.x <= box.x + box.w && p.y >= box.y && p.y <= box.y + box.h;
+}
+
+function drawChoice(box, kind, mine) {
+  const tint = (kind === "banana") ? "245,209,59" : "253,253,245";
+  ctx.fillStyle = mine ? "rgba(" + tint + ",0.16)" : "rgba(255,255,255,0.04)";
+  ctx.fillRect(box.x, box.y, box.w, box.h);
+  ctx.strokeStyle = mine ? "rgb(" + tint + ")" : "rgba(255,255,255,0.22)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(box.x + 0.5, box.y + 0.5, box.w - 1, box.h - 1);
+  if (mine) {
+    ctx.strokeRect(box.x + 2.5, box.y + 2.5, box.w - 5, box.h - 5);
+  }
+  drawSpriteScaled(SPR[kind],
+    box.x + (box.w - ITEM_W * CHOICE_K) / 2,
+    box.y + (box.h - ITEM_H * CHOICE_K) / 2, CHOICE_K);
+}
+
 function drawTitle() {
   drawBackground();
   drawLeaves();
-  drawPanel([
-    { t: "MONKEY CHASE",            c: "#ffe066", s: 15, gap: 9 },
-    { t: "Tag in the treetops",     c: "#8ef2a0", s: 8,  gap: 13 },
-    { t: "Whoever wears the red",   c: "#e8e8e8", s: 8 },
-    { t: "heart has to catch.",     c: "#e8e8e8", s: 8 },
-    { t: "Play until each of you",  c: "#e8e8e8", s: 8 },
-    { t: "has been it three times.", c: "#e8e8e8", s: 8, gap: 13 },
-    { t: "Drag your thumb to run",  c: "#cfe8d4", s: 8 },
-    { t: "On a vine: climb",        c: "#cfe8d4", s: 8 },
-    { t: "On a branch, press down", c: "#cfe8d4", s: 8 },
-    { t: "to drop through",         c: "#cfe8d4", s: 8, gap: 13 },
-    { t: "Your flower makes him",   c: "#fdfdf5", s: 8 },
-    { t: "stop and sniff",          c: "#fdfdf5", s: 8 },
-    { t: "His banana makes you slip", c: "#f5d13b", s: 8, gap: 15 },
-    { t: "TAP TO START",            c: "#ffe066", s: 10 }
-  ], H * 0.14);
+  ctx.fillStyle = "rgba(6,14,10,0.87)";
+  ctx.fillRect(0, 0, W, H);
+  layoutTitle();
+
+  text("MONKEY CHASE", W / 2, H * 0.13, "#ffe066", "center", 15);
+  text("WHICH ONE ARE YOU?", W / 2, H * 0.21, "#cfe8d4", "center", 9);
+
+  drawChoice(uiFlower, "flower", roleChosen && playerItem === "flower");
+  drawChoice(uiBanana, "banana", roleChosen && playerItem === "banana");
+
+  const labelY = uiFlower.y + uiFlower.h + 7;
+  if (roleChosen) {
+    const mine = (playerItem === "flower") ? uiFlower : uiBanana;
+    const theirs = (playerItem === "flower") ? uiBanana : uiFlower;
+    text("YOU", mine.x + mine.w / 2, labelY, "#ffe066", "center", 8);
+    text("CPU", theirs.x + theirs.w / 2, labelY, "#7fa88a", "center", 8);
+  }
+
+  // Startknopf, bis zur Wahl gedaempft
+  ctx.fillStyle = roleChosen ? "rgba(255,224,102,0.18)" : "rgba(255,255,255,0.04)";
+  ctx.fillRect(uiStart.x, uiStart.y, uiStart.w, uiStart.h);
+  ctx.strokeStyle = roleChosen ? "#ffe066" : "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(uiStart.x + 0.5, uiStart.y + 0.5, uiStart.w - 1, uiStart.h - 1);
+  text("START", uiStart.x + uiStart.w / 2, uiStart.y + 8,
+       roleChosen ? "#ffe066" : "#5d6b62", "center", 12);
 }
 
 function drawOver() {
@@ -1145,7 +1206,16 @@ function startRound() {
 }
 
 function onDown(id, cx, cy) {
-  if (state === STATE.TITLE || state === STATE.OVER) { startRound(); return; }
+  if (state === STATE.TITLE) {
+    initAudio();
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    const q = toLogical(cx, cy);
+    if (hits(uiFlower, q)) { playerItem = "flower"; roleChosen = true; blip(760, 0.06); return; }
+    if (hits(uiBanana, q)) { playerItem = "banana"; roleChosen = true; blip(560, 0.06); return; }
+    if (roleChosen && hits(uiStart, q)) startRound();
+    return;
+  }
+  if (state === STATE.OVER) { startRound(); return; }
   const p = toLogical(cx, cy);
   if (Math.hypot(p.x - itemBtn.x, p.y - itemBtn.y) <= itemBtn.r + 4) { dropItem(player); return; }
   if (stickId === null) {
@@ -1190,7 +1260,14 @@ window.addEventListener("keydown", e => {
     if (state === STATE.PLAY) dropItem(player);
     e.preventDefault();
   }
-  if (e.key === "Enter" && (state === STATE.TITLE || state === STATE.OVER)) startRound();
+  if (e.key === "Enter") {
+    if (state === STATE.OVER) startRound();
+    else if (state === STATE.TITLE && roleChosen) startRound();
+  }
+  if (state === STATE.TITLE && (e.key === "1" || e.key === "2")) {
+    playerItem = (e.key === "1") ? "flower" : "banana";
+    roleChosen = true;
+  }
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(e.key) >= 0) e.preventDefault();
 });
 window.addEventListener("keyup", e => { keys[e.key] = false; });

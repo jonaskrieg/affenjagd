@@ -16,6 +16,13 @@ to `YOU` and `HIM` in the top bar track that.
 After every tag the new catcher pauses for a moment, so the one who just got
 away has a head start.
 
+## Picking a side
+
+The start screen shows nothing but a flower and a banana: *which one are you?*
+Tap one, tap START. The other monkey is played by the computer. Whichever you
+pick, you are always the lighter brown monkey, so you can find yourself in a
+scramble even when both items are recharging.
+
 ## Controls
 
 Put your thumb anywhere and drag — the stick appears wherever you touch.
@@ -38,12 +45,20 @@ Each monkey carries its own item visibly in front of it. An empty hand means it
 is recharging — that doubles as the cooldown indicator, so there is no extra
 gauge.
 
-- **White flower** (you): the other one stops to sniff it, because it smells so
-  good. Buys you distance.
-- **Banana** (him): you slip and lose control for a moment. Good for making
-  someone overshoot.
+- **White flower**: whoever walks into it stops to sniff, because it smells so
+  good. Buys distance.
+- **Banana**: whoever walks into it slips and loses control for a moment. Good
+  for making someone overshoot.
 
 Your own item never hurts you.
+
+## Vines
+
+Once you are on a vine you stay on it. A thumb held at a slight angle used to
+peel you off and drop you, so sideways movement is ignored while climbing and
+you are pulled to the middle of the vine. Letting go is a deliberate sideways
+push with no up or down — or pressing down at the very bottom, where there is
+nowhere left to climb.
 
 ## How it is built
 
