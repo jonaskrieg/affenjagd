@@ -1539,7 +1539,7 @@ function drawOver() {
   const heartY = top + 16 + Math.sin(clock * 2.2) * 3;
   const sy = top + 20 + SPR.heart.height * hk;
 
-  text(net.status === "lost" ? "PLAYER 2 LEFT" : "FRIENDS AGAIN",
+  text(net.status === "lost" ? "PLAYER 2 LEFT" : "THERE'S LOVE AGAIN",
        W / 2, top, "#ff8f7a", "center", 10);
   drawSpriteScaled(SPR.heart, W / 2 - (SPR.heart.width * hk) / 2, heartY, hk);
   drawSpriteScaled(SPR.hug, (W - SPR.hug.width * k) / 2, sy, k);
