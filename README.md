@@ -13,8 +13,9 @@ second of freedom, plus 25 for tagging your way out of it. There is no clock:
 the round runs until each monkey has been it three times. The three hearts next
 to `YOU` and `HIM` in the top bar track that.
 
-After every tag the new catcher pauses for a moment, so the one who just got
-away has a head start.
+After every tag the new catcher is frozen for five seconds, so the one who just
+got away has a real head start. Only the catcher is held — the escapee keeps
+their momentum and runs off immediately.
 
 ## Picking a side
 
@@ -46,11 +47,19 @@ is recharging — that doubles as the cooldown indicator, so there is no extra
 gauge.
 
 - **White flower**: whoever walks into it stops to sniff, because it smells so
-  good. Buys distance.
-- **Banana**: whoever walks into it slips and loses control for a moment. Good
-  for making someone overshoot.
+  good.
+- **Banana**: whoever walks into it slips, stops dead, and loses their grip —
+  step on one while hanging from a vine and you drop.
 
-Your own item never hurts you.
+Both stop the victim where they stand. An earlier version had the banana fling
+you along with momentum, which backfired: during a chase it slid the catcher
+straight into the runner instead of costing them time.
+
+Your own item never hurts you, and it lands on the side you are facing — the
+same side you carry it on.
+
+A catcher who cannot move cannot catch. While the heart-carrier is frozen,
+sniffing, or slipping, you can walk straight past them.
 
 ## Vines
 
