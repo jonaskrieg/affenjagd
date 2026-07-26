@@ -37,6 +37,13 @@ page; the rest goes over broadcast messages. The publishable key sitting in
 `index.html` is meant to be public — that is how Supabase client apps work.
 No database tables and no security rules are involved.
 
+The tree's height normally adapts to the shape of your window. In a two-player
+round that would be a disaster — the same y coordinate would mean a different
+place on each screen, so the opponent appears a row off and your own monkey
+gets yanked around by corrections that do not fit your map. So the host sends
+its row count when the round begins and the guest rebuilds the tree to match,
+letterboxing if its window has a different shape.
+
 Whoever arrived first is the authority: that browser runs the simulation for
 both monkeys and sends the result about fifteen times a second. The other
 sends only its thumb input, twenty times a second, and predicts its own monkey

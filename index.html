@@ -785,7 +785,7 @@ function updateAI(dt) {
    ============================================================ */
 const SUPA_URL = "https://iiscxnttsskfctcepjcd.supabase.co";
 const SUPA_KEY = "sb_publishable_rzk7ONw4HThM91u4VvgyaA_-7aVxi0W";
-const ROOM     = "affenjagd-v1";
+const ROOM     = "affenjagd-v2";   // bei Protokollaenderung hochzaehlen
 
 const SEND_STATE_HZ = 15;
 const SEND_INPUT_HZ = 20;
@@ -803,8 +803,28 @@ const net = {
   guestIn: { x: 0, y: 0 },   // beim Gastgeber: letzte Eingabe des Gastes
   dropSeq: 0, seenDropSeq: 0,
   snapA: null, snapB: null, snapTime: 0, snapGap: 1 / SEND_STATE_HZ,
-  lastState: 0, lastInput: 0
+  lastState: 0, lastInput: 0,
+  seen: new Map(),           // Kennung -> Zeit der letzten Lebensmeldung
+  firstSeen: new Map()
 };
+
+const HB_INTERVALL = 5000;   // Abstand zwischen zwei Lebensmeldungen
+const HB_GEDULD    = 45000;  // danach gilt ein Teilnehmer als weg
+
+// Normalerweise raeumt Supabase abgebrochene Verbindungen selbst weg.
+// Die Lebensmeldung ist nur das Sicherheitsnetz gegen einen Teilnehmer,
+// der zwar verbunden, aber eingefroren ist — bei zwei Plaetzen wuerde
+// ein einziger solcher Geist den Raum dauerhaft blockieren.
+//
+// Bewusst ueber setInterval statt ueber die Bildschleife: ein Fenster
+// im Hintergrund zeichnet nicht mehr, und ein kurzer App-Wechsel darf
+// niemanden aus dem Spiel werfen. Die Geduld ist deshalb grosszuegig.
+function startHeartbeat() {
+  setInterval(() => {
+    if (net.ch) net.ch.send({ type: "broadcast", event: "hb", payload: { id: net.myId } });
+  }, HB_INTERVALL);
+  setInterval(() => { if (net.ch) onPresence(); }, 3000);
+}
 
 function packFlags(m) {
   return (m.it ? 1 : 0) | (m.freeze > 0 ? 2 : 0) | (m.sniff > 0 ? 4 : 0) |
@@ -813,15 +833,20 @@ function packFlags(m) {
 }
 // Die Zeiten selbst bleiben beim Gastgeber. Hier genuegt "gilt gerade",
 // laufend aufgefrischt vom naechsten Zustandspaket.
-function applyFlags(m, f) {
+function applySpielFlags(m, f) {
   m.it        = !!(f & 1);
   m.freeze    = (f & 2)   ? 0.25 : 0;
   m.sniff     = (f & 4)   ? 0.25 : 0;
   m.slip      = (f & 8)   ? 0.25 : 0;
   m.itemReady = !!(f & 16);
-  m.onVine    = !!(f & 32);
-  m.onGround  = !!(f & 64);
   m.immune    = (f & 128) ? 0.25 : 0;
+}
+
+// Fuer den Gegner zusaetzlich die Haltung, die wir nicht selbst rechnen.
+function applyFlags(m, f) {
+  applySpielFlags(m, f);
+  m.onVine   = !!(f & 32);
+  m.onGround = !!(f & 64);
 }
 
 function snapOf(m, cnt) {
@@ -853,13 +878,18 @@ function sendInput() {
   });
 }
 
-// Der Gast sagt seine eigene Figur voraus. Weicht sie zu weit von der
-// Wahrheit des Gastgebers ab, wird sie sanft nachgezogen; bei grossem
-// Fehler hart gesetzt.
+// Der Gast sagt seine eigene Figur voraus. Die Wahrheit des Gastgebers
+// hinkt um die Laufzeit hinterher, deshalb wird nur bei nennenswerter
+// Abweichung nachgezogen — sonst zerrt jede Meldung an der Figur und
+// sie zuckt. Erst bei grossem Fehler hart gesetzt.
 function reconcile(m, sx, sy) {
   const dx = sx - m.x, dy = sy - m.y;
-  if (Math.abs(dx) > 14 || Math.abs(dy) > 14) { m.x = sx; m.y = sy; m.vx = 0; m.vy = 0; }
-  else { m.x += dx * 0.18; m.y += dy * 0.18; }
+  if (Math.abs(dx) > 26 || Math.abs(dy) > 26) {
+    m.x = sx; m.y = sy; m.vx = 0; m.vy = 0;
+    return;
+  }
+  if (Math.abs(dx) > 6) m.x += dx * 0.08;
+  if (Math.abs(dy) > 6) m.y += dy * 0.08;
 }
 
 function applySnapshot(p) {
@@ -870,8 +900,9 @@ function applySnapshot(p) {
   const mine  = (net.role === "host") ? p.a : p.b;
   const yours = (net.role === "host") ? p.b : p.a;
 
-  applyFlags(player, mine[3]);
-  player.face = mine[2];
+  // Die eigene Haltung (Boden, Liane) rechnen wir selbst weiter — sie
+  // vom Gastgeber zu uebernehmen wirft die Vorhersage durcheinander.
+  applySpielFlags(player, mine[3]);
   player.itCount = mine[4];
   reconcile(player, mine[0], mine[1]);
 
@@ -910,7 +941,16 @@ function peersSorted(stateObj) {
       if (meta && meta.id) nachId.set(meta.id, meta);
     }
   }
-  const list = [...nachId.values()];
+  const jetzt = Date.now();
+  const list = [...nachId.values()].filter(p => {
+    if (p.id === net.myId) return true;
+    const gehoert = net.seen.get(p.id);
+    if (gehoert) return gehoert > jetzt - HB_GEDULD;
+    // Noch keine Lebensmeldung gehoert: kurze Schonfrist fuer Neulinge
+    const zuerst = net.firstSeen.get(p.id);
+    if (!zuerst) { net.firstSeen.set(p.id, jetzt); return true; }
+    return zuerst > jetzt - HB_GEDULD;
+  });
   list.sort((x, y) => (x.joined - y.joined) || (x.id < y.id ? -1 : 1));
   return list;
 }
@@ -964,6 +1004,9 @@ async function connect() {
     const ch = sb.channel(ROOM, { config: { presence: { key: net.myId } } });
 
     ch.on("presence", { event: "sync" }, onPresence);
+    ch.on("broadcast", { event: "hb" }, (m) => {
+      if (m.payload && m.payload.id) net.seen.set(m.payload.id, Date.now());
+    });
     ch.on("broadcast", { event: "s" }, (m) => {
       if (net.role === "guest") applySnapshot(m.payload);
     });
@@ -974,11 +1017,20 @@ async function connect() {
       if (m.payload.q !== net.seenDropSeq) { net.seenDropSeq = m.payload.q; dropItem(rival); }
     });
     ch.on("broadcast", { event: "go" }, () => {
-      if (state !== STATE.PLAY) { resetRound(); state = STATE.PLAY; }
+      if (net.role === "host" && state !== STATE.PLAY) beginRound();
+    });
+    ch.on("broadcast", { event: "begin" }, (m) => {
+      if (net.role !== "guest") return;
+      adoptRows(m.payload && m.payload.rows);
+      netGuestScore = 0;
+      net.snapA = null; net.snapB = null;
+      resetRound();
+      state = STATE.PLAY;
+      net.status = "playing";
     });
 
     ch.subscribe((status) => {
-      if (status === "SUBSCRIBED") { net.ch = ch; trackMe(); }
+      if (status === "SUBSCRIBED") { net.ch = ch; trackMe(); startHeartbeat(); }
       else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") net.status = "error";
     });
   } catch (e) {
@@ -1105,6 +1157,7 @@ function checkTag() {
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d", { alpha: false });
 let scale = 1, bgCache = null, clock = 0;
+let forcedRows = 0;        // im Mehrspieler vom Gastgeber vorgegeben
 
 function layout() {
   // Manche Umgebungen melden beim ersten Aufruf noch 0 — ohne diese
@@ -1113,8 +1166,16 @@ function layout() {
   const vh = window.innerHeight || document.documentElement.clientHeight || 780;
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
 
-  let rows = Math.round((W * vh / vw) / TILE);
-  if (!isFinite(rows)) rows = 39;
+  let rows;
+  if (forcedRows) {
+    // Im Mehrspieler gibt der Gastgeber die Baumhoehe vor. Sonst haetten
+    // beide je nach Fensterform verschieden hohe Baeume, und dieselben
+    // Koordinaten wuerden verschiedene Orte bedeuten.
+    rows = forcedRows;
+  } else {
+    rows = Math.round((W * vh / vw) / TILE);
+    if (!isFinite(rows)) rows = 39;
+  }
   rows = Math.max(28, Math.min(46, rows));
   const rebuild = (rows !== ROWS) || !grid;
   ROWS = rows;
@@ -1559,18 +1620,39 @@ function toLogical(cx, cy) {
   return { x: (cx - r.left) / (r.width / W), y: (cy - r.top) / (r.height / H) };
 }
 
+// Der Gastgeber gibt Baumhoehe und Startzeitpunkt vor. Der Gast bittet
+// nur darum, sonst spielten beide auf verschieden hohen Baeumen.
 function startRound() {
   initAudio();
   if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  if (net.role === "guest") {
+    if (net.ch) net.ch.send({ type: "broadcast", event: "go", payload: {} });
+    return;
+  }
+  beginRound();
+}
+
+function beginRound() {
   netGuestScore = 0;
   net.snapA = null; net.snapB = null;
   net.guestIn.x = 0; net.guestIn.y = 0;
   resetRound();
   state = STATE.PLAY;
-  if (net.on && net.ch) {
+  if (net.role === "host" && net.ch) {
     net.status = "playing";
-    net.ch.send({ type: "broadcast", event: "go", payload: {} });
+    net.ch.send({ type: "broadcast", event: "begin", payload: { rows: ROWS } });
   }
+}
+
+function adoptRows(r) {
+  if (!r || r === ROWS) return;
+  forcedRows = r;
+  layout();                       // Karte und Wegegraph neu aufbauen
+}
+
+function zurueckZumVorraum() {
+  if (forcedRows) { forcedRows = 0; layout(); }
+  state = STATE.TITLE;
 }
 
 // Der Gast wirft nicht selbst, sondern bittet den Gastgeber darum.
@@ -1598,7 +1680,7 @@ function onDown(id, cx, cy) {
     if (roleChosen && hits(uiStart, q)) startRound();
     return;
   }
-  if (state === STATE.OVER) { state = STATE.TITLE; return; }
+  if (state === STATE.OVER) { zurueckZumVorraum(); return; }
   const p = toLogical(cx, cy);
   if (Math.hypot(p.x - itemBtn.x, p.y - itemBtn.y) <= itemBtn.r + 4) { requestDrop(); return; }
   if (stickId === null) {
@@ -1644,7 +1726,7 @@ window.addEventListener("keydown", e => {
     e.preventDefault();
   }
   if (e.key === "Enter") {
-    if (state === STATE.OVER) state = STATE.TITLE;
+    if (state === STATE.OVER) zurueckZumVorraum();
     else if (state === STATE.TITLE && roleChosen) startRound();
   }
   if (state === STATE.TITLE && (e.key === "1" || e.key === "2")) {
